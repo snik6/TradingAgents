@@ -10,9 +10,9 @@ load_dotenv()
 # Endpoint defaults to http://localhost:11434/v1 (set in openai_client.py).
 config = DEFAULT_CONFIG.copy()
 config["llm_provider"] = "ollama"
-config["deep_think_llm"] = "qwen2.5:14b"   # researcher debate, risk review
-config["quick_think_llm"] = "qwen2.5:14b"  # analyst summaries
-config["max_debate_rounds"] = 1            # keep low — local inference is slow
+config["deep_think_llm"] = "mistral-nemo:12b"   # researcher debate, risk review
+config["quick_think_llm"] = "mistral-nemo:12b"  # analyst summaries
+config["max_debate_rounds"] = 1                 # keep low — local inference is slow
 
 # Configure data vendors (default uses yfinance, no extra API keys needed)
 config["data_vendors"] = {
