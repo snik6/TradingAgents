@@ -1,232 +1,268 @@
-"""WSJ plain-text news vendor for TradingAgents.
+"""WSJ news vendor for TradingAgents — backed by shared/wsj_signals.db.
 
-Reads the ``WSJNewsPaper-{date}_plain.txt`` files produced daily (~6am) by
-``scanner-politics/fetch_wsj.py`` and consumed by ``scanner-news``.  This vendor
-lets the News Analyst use the same Wall Street Journal "What's News" digest.
+The DB is built daily by the scanner-politics pipeline from the WSJ PDF:
+full article bodies (`articles`), ticker tags (`article_tickers`), LLM-extracted
+events (`article_signals`), per-ticker daily aggregates (`ticker_daily_metrics`)
+and a macro scoring row per day (`global_signals`).
 
-The plain text (pdftotext without -layout) uses U+E013 as the bullet character
-for What's News items — already-clean 1-2 sentence summaries.  No network calls:
-this purely reads local files.  The directory is configurable via the ``WSJ_DIR``
-environment variable (default ``~/gitFinance/tmp``).
+This vendor exposes that to the News Analyst:
+  * get_news_wsj         — articles + extracted signals for a specific ticker
+  * get_global_news_wsj  — the daily macro digest + top-importance articles
 
-Parsing logic is adapted from ``scanner-news/src/news_scanner/wsj_fetcher.py``.
+No network calls. DB location overridable via the WSJ_DB env var. Every
+function returns an informative string and never raises, so vendor routing
+stays predictable.
 """
 
+import json
 import logging
 import os
 import re
+import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# U+E013 is the bullet glyph for "What's News" items in the WSJ plain text.
-BULLET = ""
+_WS_RE = re.compile(r"\s+")
 
-# End-of-bullet marker: a page reference ("A2", "B10") or "WSJ.com". Each
-# What's News bullet ends with exactly one of these — used to truncate the
-# bullet so it does not bleed into the following article or quote tables.
-_BULLET_END_RE = re.compile(r"\s(?:[A-Z]\d{1,2}|WSJ\.com)\b")
-# Hyphenated line-break: "nar-\nrower" -> "narrower"
-_HYPHEN_BREAK_RE = re.compile(r"-\n\s*")
-# Collapse runs of spaces/tabs.
-_MULTI_SPACE_RE = re.compile(r"[ \t]+")
-# Numeric token (price/percent/ticker-table cell), used to detect quote tables.
-_NUM_TOKEN_RE = re.compile(r"^[-+]?\$?\d[\d.,]*%?$")
+# article_signals event columns -> human label.
+_EVENT_LABELS = {
+    "event_earnings_beat": "earnings beat", "event_earnings_miss": "earnings miss",
+    "event_analyst_upgrade": "analyst upgrade", "event_analyst_downgrade": "analyst downgrade",
+    "event_guidance_raise": "guidance raise", "event_guidance_cut": "guidance cut",
+    "event_ma_target": "M&A target", "event_ma_acquirer": "M&A acquirer",
+    "event_product_launch": "product launch", "event_buyback": "buyback",
+    "event_layoff": "layoffs", "event_regulatory": "regulatory action",
+    "event_legal": "legal action", "event_dividend_cut": "dividend cut",
+    "event_credit_downgrade": "credit downgrade", "event_ceo_departure": "CEO departure",
+}
 
-# Quote-table / chart-caption fragments that leak into bullets. "Sym" is the
-# WSJ quote-table column header for "Symbol" — its presence (alongside the other
-# headers, or a chart data-source citation) marks a bullet as table noise, not
-# prose. Dropping these also prevents a ticker filter matching the stray "Sym".
-_TABLE_NOISE_RE = re.compile(
-    r"\b(?:Sym\s+Close\s+Chg|Net\s+Sym|Close\s+Chg\s+Stock"
-    r"|Source:\s*(?:FactSet|Refinitiv|Dow\s+Jones|Bloomberg))\b",
-    re.IGNORECASE,
+
+def _db_path() -> Path:
+    return Path(
+        os.environ.get("WSJ_DB", "~/gitFinance/shared/wsj_signals.db")
+    ).expanduser()
+
+
+def _connect() -> Optional[sqlite3.Connection]:
+    path = _db_path()
+    if not path.exists():
+        return None
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _clean(text: str, limit: int) -> str:
+    """Collapse whitespace and truncate to limit chars on a word boundary."""
+    text = _WS_RE.sub(" ", text or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rsplit(" ", 1)[0] + "…"
+
+
+def _headline(row: sqlite3.Row) -> str:
+    h = _WS_RE.sub(" ", (row["headline"] or "")).strip()
+    return h if len(h) > 8 else _clean(row["body"], 80)
+
+
+_SUFFIX_RE = re.compile(
+    r"\b(inc|corp|corporation|co|ltd|plc|group|holdings|company|comp|the|"
+    r"class [a-c]|&)\b\.?", re.IGNORECASE
 )
 
-# A real What's News bullet is a 1-2 sentence summary; anything longer means the
-# chunk over-captured the article or quote table that follows it.
-_MAX_BULLET_LEN = 360
 
-
-def _wsj_dir() -> Path:
-    """Directory holding WSJNewsPaper-*_plain.txt files."""
-    return Path(os.environ.get("WSJ_DIR", "~/gitFinance/tmp")).expanduser()
-
-
-def _plain_file(day: datetime) -> Path:
-    return _wsj_dir() / f"WSJNewsPaper-{day.strftime('%Y-%m-%d')}_plain.txt"
-
-
-def _clean(text: str) -> str:
-    """Fix hyphenated line breaks and normalise whitespace."""
-    text = _HYPHEN_BREAK_RE.sub("", text)
-    text = text.replace("\n", " ")
-    text = _MULTI_SPACE_RE.sub(" ", text)
-    return text.strip()
-
-
-def _looks_like_table(text: str) -> bool:
-    """True when a blob is mostly numbers — i.e. a stock-quote table, not prose."""
-    tokens = text.split()
-    if len(tokens) < 6:
-        return False
-    numeric = sum(1 for t in tokens if _NUM_TOKEN_RE.match(t))
-    return numeric / len(tokens) > 0.25
-
-
-def _parse_whats_news(text: str) -> List[Dict]:
-    """Extract bullet items from the What's News section.
-
-    Each bullet is truncated at its page reference ("A2", "WSJ.com", ...) so it
-    does not bleed into the article or quote table that follows it.  Bullets are
-    WSJ's own editorially-curated digest of the day's most important stories —
-    the highest-signal content in the paper for a markets news analyst.
-    """
-    articles = []
-    seen = set()
-    for chunk in text.split(BULLET)[1:]:  # chunk[0] is the pre-bullet header
-        cleaned = _clean(chunk)
-        end = _BULLET_END_RE.search(cleaned)
-        # Accept the page-ref cut only if it lands within a plausible bullet
-        # length; a far-off match belongs to a later article, not this bullet.
-        if end and end.start() <= _MAX_BULLET_LEN:
-            cleaned = cleaned[: end.start()].strip()
-        else:
-            cleaned = cleaned[:_MAX_BULLET_LEN].strip()
-        if len(cleaned) < 30 or _looks_like_table(cleaned) or _TABLE_NOISE_RE.search(cleaned):
-            continue
-        if cleaned[:50] in seen:
-            continue
-        seen.add(cleaned[:50])
-        first_period = cleaned.find(". ")
-        title = cleaned[: first_period + 1].strip() if first_period > 20 else cleaned[:80].strip()
-        articles.append({"title": title, "description": cleaned, "source": "WSJ What's News"})
-    return articles
-
-
-def _parse_wsj_day(day: datetime) -> List[Dict]:
-    """Parse the WSJ What's News digest for a single day. [] if no paper."""
-    path = _plain_file(day)
-    if not path.exists():
-        return []
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError as e:
-        logger.warning("Could not read WSJ file %s: %s", path, e)
-        return []
-    return _parse_whats_news(text)
-
-
-def _format(articles: List[Dict]) -> str:
-    out = ""
-    for a in articles:
-        out += f"### {a['title']} (source: {a['source']})\n{a['description']}\n\n"
-    return out
-
-
-def get_news_wsj(ticker: str, start_date: str, end_date: str) -> str:
-    """Retrieve WSJ news relevant to a ticker over a date range.
-
-    WSJ "What's News" is a market-wide digest, so articles are filtered for
-    mentions of the ticker symbol or company name.  When nothing matches, the
-    full digest is returned as general market context.
-    """
-    try:
-        start = datetime.strptime(start_date, "%Y-%m-%d")
-        end = datetime.strptime(end_date, "%Y-%m-%d")
-    except ValueError as e:
-        return f"WSJ: invalid date range ({e})"
-
-    all_articles, days_with_paper = [], []
-    day = start
-    while day <= end:
-        day_articles = _parse_wsj_day(day)
-        if day_articles:
-            days_with_paper.append(day.strftime("%Y-%m-%d"))
-            all_articles.extend(day_articles)
-        day += timedelta(days=1)
-
-    if not all_articles:
-        return (
-            f"No WSJ paper found for {ticker} between {start_date} and {end_date} "
-            f"(searched {_wsj_dir()})."
-        )
-
-    # Build relevance terms: the ticker plus the company name from yfinance.
-    terms = {ticker.lower()}
+def _company_name_token(ticker: str) -> Optional[str]:
+    """Distinctive lowercased company-name token for `ticker` (first ~2 words),
+    used to confirm a tagged article is genuinely about the company rather than
+    a stray ticker symbol from an embedded quote table. None if unresolved."""
     try:
         import yfinance as yf
 
         info = yf.Ticker(ticker).info or {}
         for key in ("shortName", "longName", "displayName"):
             name = info.get(key)
-            if name:
-                # Drop common corporate suffixes for looser matching.
-                core = re.sub(
-                    r"\b(inc|corp|corporation|co|ltd|plc|group|holdings|the)\b\.?",
-                    "",
-                    name.lower(),
-                ).strip()
-                if core:
-                    terms.add(core)
-    except Exception as e:  # noqa: BLE001 - network/parse failures are non-fatal
+            if not name:
+                continue
+            core = _SUFFIX_RE.sub("", name.lower())
+            words = [w for w in core.split() if len(w) > 1]
+            if words:
+                return " ".join(words[:2])
+    except Exception as e:  # noqa: BLE001 - network/parse failure is non-fatal
         logger.info("WSJ: company-name lookup failed for %s: %s", ticker, e)
+    return None
 
-    ticker_re = re.compile(rf"\b{re.escape(ticker)}\b", re.IGNORECASE)
-    matched = [
-        a
-        for a in all_articles
-        if ticker_re.search(a["title"] + " " + a["description"])
-        or any(t in (a["title"] + " " + a["description"]).lower() for t in terms if len(t) > 3)
-    ]
 
-    header = f"## WSJ News for {ticker}, from {start_date} to {end_date} (papers: {', '.join(days_with_paper)}):\n\n"
-    if matched:
-        return header + _format(matched)
-    return (
-        header
-        + f"No WSJ articles mentioned {ticker} directly. "
-        "Full WSJ market digest follows as general context:\n\n"
-        + _format(all_articles)
-    )
+def _signal_summary(conn, ticker: str, start: str, end: str) -> str:
+    """One-line digest of extracted events for a ticker over a date range."""
+    rows = conn.execute(
+        "SELECT * FROM article_signals WHERE ticker=? AND date BETWEEN ? AND ?",
+        (ticker, start, end),
+    ).fetchall()
+    if not rows:
+        return ""
+    events = []
+    for col, label in _EVENT_LABELS.items():
+        n = sum(1 for r in rows if r[col])
+        if n:
+            events.append(f"{label} ×{n}" if n > 1 else label)
+    sents = [r["sentiment_score"] for r in rows if r["sentiment_score"] is not None]
+    pt = [r["pt_change_pct"] for r in rows if r["pt_change_pct"] is not None]
+    parts = []
+    if events:
+        parts.append("events: " + ", ".join(events))
+    if sents:
+        parts.append(f"avg sentiment {sum(sents) / len(sents):+.2f}")
+    if pt:
+        parts.append(f"price-target change {sum(pt) / len(pt):+.1f}%")
+    return "  ·  ".join(parts)
+
+
+def get_news_wsj(ticker: str, start_date: str, end_date: str) -> str:
+    """WSJ articles tagged to `ticker` between start_date and end_date,
+    plus a summary of extracted signals. Falls back to the macro digest when
+    the ticker has no WSJ coverage in range."""
+    conn = _connect()
+    if conn is None:
+        return f"WSJ database not found at {_db_path()} — no WSJ news for {ticker}."
+    try:
+        rows = conn.execute(
+            """SELECT a.date, a.headline, a.body, a.section, a.importance,
+                      at.mention_count
+               FROM articles a
+               JOIN article_tickers at ON a.id = at.article_id
+               WHERE at.ticker = ? AND a.date BETWEEN ? AND ?
+               ORDER BY a.importance DESC, at.mention_count DESC""",
+            (ticker, start_date, end_date),
+        ).fetchall()
+
+        # The DB's article bodies are imperfectly segmented and embed quote
+        # tables, so a stray ticker symbol can tag an unrelated article. Keep
+        # only articles whose body actually contains the company name.
+        note = ""
+        token = _company_name_token(ticker)
+        if token and rows:
+            genuine = [r for r in rows if token in (r["body"] or "").lower()]
+            if genuine:
+                if len(genuine) < len(rows):
+                    note = (f"_(filtered {len(rows) - len(genuine)} of {len(rows)} "
+                            f"tagged articles that did not mention '{token}')_\n")
+                rows = genuine
+            else:
+                note = (f"_(none of {len(rows)} tagged articles mention '{token}'; "
+                        f"tags may be spurious — showing all)_\n")
+
+        if not rows:
+            digest = get_global_news_wsj(end_date, _days_between(start_date, end_date), 8)
+            return (
+                f"## WSJ News for {ticker}, {start_date} to {end_date}:\n\n"
+                f"No WSJ articles tagged to {ticker} in this window. "
+                f"WSJ macro digest follows as general context:\n\n{digest}"
+            )
+
+        out = [f"## WSJ News for {ticker}, {start_date} to {end_date} "
+               f"({len(rows)} articles):\n"]
+        if note:
+            out.append(note)
+        sig = _signal_summary(conn, ticker, start_date, end_date)
+        if sig:
+            out.append(f"**Extracted signals for {ticker}:** {sig}\n")
+        for r in rows:
+            out.append(f"### {_headline(r)}  ({r['date']}, {r['section']})")
+            out.append(_clean(r["body"], 600) + "\n")
+        return "\n".join(out)
+    except sqlite3.Error as e:
+        logger.warning("WSJ DB read failed for %s: %s", ticker, e)
+        return f"WSJ database error for {ticker}: {e}"
+    finally:
+        conn.close()
 
 
 def get_global_news_wsj(curr_date: str, look_back_days: int = 7, limit: int = 10) -> str:
-    """Retrieve the WSJ "What's News" macro digest ending on curr_date."""
-    try:
-        curr = datetime.strptime(curr_date, "%Y-%m-%d")
-    except ValueError as e:
-        return f"WSJ: invalid date ({e})"
-
-    # The LLM may pass these as None explicitly — fall back to defaults.
+    """The WSJ daily macro digest ending on curr_date: the pre-scored
+    global_signals row plus the top-importance articles of the window."""
     look_back_days = look_back_days if look_back_days else 7
     limit = limit if limit else 10
+    conn = _connect()
+    if conn is None:
+        return f"WSJ database not found at {_db_path()} — no WSJ global news."
+    try:
+        try:
+            start = (datetime.strptime(curr_date, "%Y-%m-%d")
+                     - timedelta(days=look_back_days)).strftime("%Y-%m-%d")
+        except ValueError as e:
+            return f"WSJ: invalid date ({e})"
 
-    start = curr - timedelta(days=look_back_days)
-    collected, days_with_paper = [], []
-    # Newest day first so the limit keeps the most recent news.
-    for offset in range(look_back_days + 1):
-        day = curr - timedelta(days=offset)
-        day_articles = _parse_wsj_day(day)
-        if not day_articles:
-            continue
-        days_with_paper.append(day.strftime("%Y-%m-%d"))
-        for a in day_articles:
-            collected.append(a)
-            if len(collected) >= limit:
-                break
-        if len(collected) >= limit:
-            break
+        out = [f"## WSJ Global Market Digest, {start} to {curr_date}:\n"]
 
-    if not collected:
-        return (
-            f"No WSJ paper found between {start.strftime('%Y-%m-%d')} and {curr_date} "
-            f"(searched {_wsj_dir()})."
-        )
+        # Pre-scored macro row (the most recent on or before curr_date).
+        g = conn.execute(
+            "SELECT * FROM global_signals WHERE date <= ? ORDER BY date DESC LIMIT 1",
+            (curr_date,),
+        ).fetchone()
+        if g:
+            out.append(f"**Macro ({g['date']}):** {g['macro_label']} "
+                       f"(score {g['macro_score']:+})  ·  Fed: {g['fed_sentiment']}  ·  "
+                       f"theme: {g['dominant_theme']}")
+            for label, col in (("Risks", "key_risks"),
+                               ("Opportunities", "key_opportunities"),
+                               ("Themes", "key_themes")):
+                items = _json_list(g[col])
+                if items:
+                    out.append(f"**{label}:** {', '.join(items)}")
+            sectors = _json_obj(g["sector_scores"])
+            if sectors:
+                ranked = sorted(sectors.items(), key=lambda kv: kv[1], reverse=True)
+                out.append("**Sector scores:** "
+                           + ", ".join(f"{k} {v:+}" for k, v in ranked))
+            out.append("")
 
-    return (
-        f"## WSJ Global Market News, from {start.strftime('%Y-%m-%d')} to {curr_date} "
-        f"(papers: {', '.join(days_with_paper)}):\n\n" + _format(collected)
-    )
+        # Top-importance articles in the window (skip the staff masthead).
+        rows = conn.execute(
+            """SELECT date, headline, body, section, importance
+               FROM articles
+               WHERE date BETWEEN ? AND ?
+                 AND body NOT LIKE '%Editor in Chief%'
+               ORDER BY importance DESC, word_count DESC
+               LIMIT ?""",
+            (start, curr_date, limit),
+        ).fetchall()
+        if rows:
+            out.append(f"### Top WSJ articles ({len(rows)}):\n")
+            for r in rows:
+                out.append(f"- **{_headline(r)}** ({r['date']}) — {_clean(r['body'], 280)}")
+        elif not g:
+            return f"No WSJ data found between {start} and {curr_date}."
+        return "\n".join(out)
+    except sqlite3.Error as e:
+        logger.warning("WSJ DB read failed for global news: %s", e)
+        return f"WSJ database error: {e}"
+    finally:
+        conn.close()
+
+
+def _json_list(raw) -> list:
+    try:
+        v = json.loads(raw) if raw else []
+        return [str(x) for x in v] if isinstance(v, list) else []
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+def _json_obj(raw) -> dict:
+    try:
+        v = json.loads(raw) if raw else {}
+        return v if isinstance(v, dict) else {}
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
+def _days_between(start_date: str, end_date: str) -> int:
+    try:
+        d0 = datetime.strptime(start_date, "%Y-%m-%d")
+        d1 = datetime.strptime(end_date, "%Y-%m-%d")
+        return max(1, (d1 - d0).days)
+    except ValueError:
+        return 7
