@@ -10,8 +10,8 @@ load_dotenv()
 # Endpoint defaults to http://localhost:11434/v1 (set in openai_client.py).
 config = DEFAULT_CONFIG.copy()
 config["llm_provider"] = "ollama"
-config["deep_think_llm"] = "mistral-nemo:12b"   # researcher debate, risk review
-config["quick_think_llm"] = "mistral-nemo:12b"  # analyst summaries
+config["deep_think_llm"] = "qwen2.5:14b"   # researcher debate, risk review
+config["quick_think_llm"] = "qwen2.5:14b"  # analyst summaries
 config["max_debate_rounds"] = 1                 # keep low — local inference is slow
 
 # Configure data vendors (default uses yfinance, no extra API keys needed)
@@ -19,7 +19,14 @@ config["data_vendors"] = {
     "core_stock_apis": "yfinance",           # Options: alpha_vantage, yfinance
     "technical_indicators": "yfinance",      # Options: alpha_vantage, yfinance
     "fundamental_data": "yfinance",          # Options: alpha_vantage, yfinance
-    "news_data": "yfinance",                 # Options: alpha_vantage, yfinance
+    "news_data": "wsj",                      # Options: wsj, alpha_vantage, yfinance
+}
+
+# WSJ "What's News" digest (parsed from ~/gitFinance/tmp/WSJNewsPaper-*_plain.txt,
+# produced daily by scanner-politics). WSJ has no insider data — route that to
+# yfinance. Override the WSJ file location with the WSJ_DIR env var if needed.
+config["tool_vendors"] = {
+    "get_insider_transactions": "yfinance",
 }
 
 # Initialize with custom config
