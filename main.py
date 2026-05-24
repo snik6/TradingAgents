@@ -3,28 +3,29 @@ from tradingagents.default_config import DEFAULT_CONFIG
 
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
+# Load environment variables from .env file (expects ANTHROPIC_API_KEY).
 load_dotenv()
 
-# Create a custom config — local Ollama, no API keys, no spend.
-# Endpoint defaults to http://localhost:11434/v1 (set in openai_client.py).
+# Anthropic Claude — split cheap/fast and deep/strong models across the pipeline
+# so analyst summaries stay cheap and only the debate/synthesis pays for Sonnet.
 config = DEFAULT_CONFIG.copy()
-config["llm_provider"] = "ollama"
-config["deep_think_llm"] = "qwen2.5:14b"   # researcher debate, risk review
-config["quick_think_llm"] = "qwen2.5:14b"  # analyst summaries
-config["max_debate_rounds"] = 1                 # keep low — local inference is slow
+config["llm_provider"] = "anthropic"
+config["deep_think_llm"] = "claude-sonnet-4-6"  # researcher debate, risk review
+config["quick_think_llm"] = "claude-haiku-4-5"  # analyst summaries
+config["max_debate_rounds"] = 1                 # bump to 2+ for richer debates (more tokens)
+# Optional: enable extended thinking for the deep steps (more cost, better reasoning).
+# config["anthropic_effort"] = "medium"         # "low" | "medium" | "high"
 
-# Configure data vendors (default uses yfinance, no extra API keys needed)
+# Data vendors — yfinance is free; WSJ news comes from shared/wsj_signals.db,
+# populated by the scanner-politics pipeline. Override the DB path with WSJ_DB.
 config["data_vendors"] = {
-    "core_stock_apis": "yfinance",           # Options: alpha_vantage, yfinance
-    "technical_indicators": "yfinance",      # Options: alpha_vantage, yfinance
-    "fundamental_data": "yfinance",          # Options: alpha_vantage, yfinance
-    "news_data": "wsj",                      # Options: wsj, alpha_vantage, yfinance
+    "core_stock_apis": "yfinance",          # Options: alpha_vantage, yfinance
+    "technical_indicators": "yfinance",     # Options: alpha_vantage, yfinance
+    "fundamental_data": "yfinance",         # Options: alpha_vantage, yfinance
+    "news_data": "wsj",                     # Options: wsj, alpha_vantage, yfinance
 }
 
-# WSJ "What's News" digest (parsed from ~/gitFinance/tmp/WSJNewsPaper-*_plain.txt,
-# produced daily by scanner-politics). WSJ has no insider data — route that to
-# yfinance. Override the WSJ file location with the WSJ_DIR env var if needed.
+# WSJ has no insider data — route that one tool to yfinance.
 config["tool_vendors"] = {
     "get_insider_transactions": "yfinance",
 }
@@ -33,7 +34,7 @@ config["tool_vendors"] = {
 ta = TradingAgentsGraph(debug=True, config=config)
 
 # forward propagate
-_, decision = ta.propagate("SYM", "2026-05-21")
+_, decision = ta.propagate("SYM", "2026-05-22")
 print(decision)
 
 # Memorize mistakes and reflect
