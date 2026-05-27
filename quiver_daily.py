@@ -34,7 +34,7 @@ from quiver_analyze import (
 )
 
 _DESKTOP_DIR = Path.home() / "gitFinance" / "scanner-desktop"
-_ENRICH_PY   = _DESKTOP_DIR / "src" / "quiver_enrich.py"
+_ENRICH_PY   = Path(__file__).parent / "quiver_enrich.py"
 _ENRICH_VENV = _DESKTOP_DIR / "venv" / "bin" / "python"
 
 
