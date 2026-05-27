@@ -16,8 +16,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import smtplib
 import sqlite3
+import subprocess
 import sys
 from datetime import date
 from email.mime.text import MIMEText
@@ -30,6 +32,35 @@ from quiver_analyze import (
     fetch_quiver, fetch_wsj, fetch_desktop_enrichment,
     build_prompt, call_claude, vote_claude,
 )
+
+_DESKTOP_DIR = Path.home() / "gitFinance" / "scanner-desktop"
+_ENRICH_PY   = _DESKTOP_DIR / "src" / "quiver_enrich.py"
+_ENRICH_VENV = _DESKTOP_DIR / "venv" / "bin" / "python"
+
+
+def fetch_scanner_enrichment(tickers: list[str]) -> dict[str, dict]:
+    """Run scanner-desktop's full enrichment pipeline on all tickers at once.
+
+    Returns a dict keyed by ticker with price, market_cap_B, change_pct,
+    zscore, rvol, ou_zscore, conviction_score, conviction_breakdown, and
+    all wsj_*/quiver_* enrichment fields. Returns {} on any failure.
+    """
+    if not (_ENRICH_PY.exists() and _ENRICH_VENV.exists()):
+        return {}
+    try:
+        result = subprocess.run(
+            [str(_ENRICH_VENV), str(_ENRICH_PY)] + tickers,
+            capture_output=True, text=True,
+            cwd=str(_DESKTOP_DIR),
+            timeout=300,
+        )
+        if result.returncode != 0:
+            print(f"  [scanner-enrich] WARN: {result.stderr[:300]}")
+            return {}
+        return json.loads(result.stdout)
+    except Exception as exc:
+        print(f"  [scanner-enrich] WARN: {exc}")
+        return {}
 
 # ── Email credentials (read from env or hard-coded fallback) ─────────────────
 import os
@@ -133,16 +164,25 @@ def main() -> None:
     total_cost   = 0.0
     total_tokens = {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0}
 
+    # Batch-fetch scanner-desktop enrichment (price, zscore, rvol, conviction, …)
+    all_tickers = [c["ticker"] for c in candidates]
+    print(f"  Fetching scanner enrichment for {len(all_tickers)} tickers…")
+    scanner_data = fetch_scanner_enrichment(all_tickers)
+    print(f"  Got enrichment for {len(scanner_data)} tickers\n")
+
     for c in candidates:
         ticker = c["ticker"]
+        enr    = scanner_data.get(ticker, {})
+        price    = enr.get("price", 0.0) or 0.0
+        mktcap_B = enr.get("market_cap_B", 0.0) or 0.0
         print(f"  {ticker:6}  clusters={c['_clusters']}  skin={c['_skin']}  "
               f"${c['_purch_M']}M", end=" … ", flush=True)
         try:
             qctx     = fetch_quiver(ticker, args.date)
             wsj      = fetch_wsj(ticker, args.date)
             desktop  = fetch_desktop_enrichment(ticker)
-            prompt   = build_prompt(ticker, c["price"], c["quiver_bonus"],
-                                    c["signals"], c["mktcap_B"], qctx, wsj, desktop)
+            prompt   = build_prompt(ticker, price, c["quiver_bonus"],
+                                    c["signals"], mktcap_B, qctx, wsj, desktop, enr)
             caller = vote_claude if args.votes == 3 else call_claude
             out, cost, tokens = caller(prompt, args.model)
             total_cost += cost
@@ -152,11 +192,13 @@ def main() -> None:
             reasoning = out.get("reasoning", "")
             print(f"{rating}  (${cost:.3f})")
             results.append((ticker, rating, reasoning,
-                            c["_clusters"], c["_skin"], c["_purch_M"]))
+                            c["_clusters"], c["_skin"], c["_purch_M"],
+                            price, mktcap_B))
         except Exception as e:  # noqa: BLE001
             print(f"ERROR: {e}")
             results.append((ticker, "Hold", f"ERROR: {e}",
-                            c["_clusters"], c["_skin"], c["_purch_M"]))
+                            c["_clusters"], c["_skin"], c["_purch_M"],
+                            price, mktcap_B))
 
     results.sort(key=lambda r: RATING_RANK.get(r[1], 99))
 
@@ -171,11 +213,14 @@ def main() -> None:
 
     if actionable:
         lines += [sep, f"BUY / OVERWEIGHT ({len(actionable)} tickers)", sep]
-        for i, (ticker, rating, reasoning, clusters, skin, purch_M) in \
+        for i, (ticker, rating, reasoning, clusters, skin, purch_M, price, mcap_B) in \
                 enumerate(actionable, 1):
+            price_str = f"  ${price:.2f}" if price else ""
+            mcap_str  = f"  mcap=${mcap_B:.1f}B" if mcap_B else ""
             lines.append(
                 f"\n{i}. {ticker}: {rating}  "
                 f"[{clusters} clusters, skin={skin}, ${purch_M}M bought]"
+                f"{price_str}{mcap_str}"
             )
             lines.append(f"   {reasoning}")
     else:
@@ -185,10 +230,11 @@ def main() -> None:
         f"\n{sep}",
         "Full ranking:",
     ]
-    for ticker, rating, _, clusters, skin, purch_M in results:
+    for ticker, rating, _, clusters, skin, purch_M, price, mcap_B in results:
+        price_str = f"  ${price:.2f}" if price else ""
         lines.append(
             f"  {ticker:6} {rating:12}  "
-            f"clusters={clusters}  skin={skin}  ${purch_M}M"
+            f"clusters={clusters}  skin={skin}  ${purch_M}M{price_str}"
         )
 
     lines += [

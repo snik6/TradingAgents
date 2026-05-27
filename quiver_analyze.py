@@ -232,12 +232,16 @@ def fetch_desktop_enrichment(ticker: str) -> dict:
 
 def build_prompt(ticker: str, price: float, quiver_bonus: float,
                  signals: list[str], mktcap_B: float,
-                 qctx: dict, wsj: dict, desktop: dict | None = None) -> str:
+                 qctx: dict, wsj: dict, desktop: dict | None = None,
+                 scanner: dict | None = None) -> str:
     d = desktop or {}
+    s = scanner or {}
     effective_bonus = d.get("quiver_bonus", quiver_bonus)
+    eff_price   = s.get("price", price) or price
+    eff_mcap    = s.get("market_cap_B", mktcap_B) or mktcap_B
     lines = [
         "You are a buy-side equity analyst. Rate this stock using ONLY the signals below.",
-        f"Ticker: {ticker}  Price: ${price}  Market cap: ${mktcap_B:.1f}B  "
+        f"Ticker: {ticker}  Price: ${eff_price}  Market cap: ${eff_mcap:.1f}B  "
         f"Quiver bonus: {effective_bonus:+.2f}",
         f"Signals fired: {', '.join(signals) or 'none'}",
         "",
@@ -328,6 +332,34 @@ def build_prompt(ticker: str, price: float, quiver_bonus: float,
                                   ("credit-downgrade", d.get("wsj_credit"))] if f]
         if flags:
             lines.append(f"WSJ RISK FLAGS: {', '.join(flags)}  — penalise accordingly")
+
+    if s:
+        tech_parts = []
+        if s.get("zscore") is not None:
+            tech_parts.append(f"vol_zscore={s['zscore']}")
+        if s.get("rvol") is not None:
+            tech_parts.append(f"rvol={s['rvol']}x")
+        if s.get("ou_zscore") is not None:
+            tech_parts.append(f"ou_z={s['ou_zscore']}")
+        if s.get("change_pct") is not None:
+            tech_parts.append(f"chg={s['change_pct']:+.2f}%")
+        if s.get("hurst_regime"):
+            tech_parts.append(f"hurst={s['hurst_regime']}")
+        if s.get("gex_regime"):
+            tech_parts.append(f"gex={s['gex_regime']}")
+        if tech_parts:
+            lines.append("TECHNICAL: " + "  ".join(tech_parts))
+
+        if s.get("conviction_score") is not None:
+            brk = s.get("conviction_breakdown") or {}
+            conv = f"CONVICTION (desktop): score={s['conviction_score']:.1f}"
+            brk_parts = []
+            for k in ("quiver", "wsj", "berk", "political"):
+                if brk.get(k) is not None:
+                    brk_parts.append(f"{k}={brk[k]:.2f}")
+            if brk_parts:
+                conv += "  " + "  ".join(brk_parts)
+            lines.append(conv)
 
     if not any(k in qctx for k in ("insider", "f13", "dark_pool", "gov")) \
             and not wsj and not d:
