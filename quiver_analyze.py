@@ -242,6 +242,34 @@ def call_claude(prompt: str, model: str) -> dict:
     return data["structured_output"], cost, tokens
 
 
+def vote_claude(prompt: str, model: str) -> tuple[dict, float, dict]:
+    """Call claude twice; if ratings agree return immediately (2-call cost).
+    If they disagree call a third time as tiebreaker (3-call cost).
+    Reasoning is taken from the majority call."""
+    out1, cost1, tok1 = call_claude(prompt, model)
+    out2, cost2, tok2 = call_claude(prompt, model)
+
+    def _add(a, b):
+        return {k: a[k] + b[k] for k in a}
+
+    if out1["rating"] == out2["rating"]:
+        total_cost = cost1 + cost2
+        total_tok  = _add(tok1, tok2)
+        return out1, total_cost, total_tok
+
+    out3, cost3, tok3 = call_claude(prompt, model)
+    total_cost = cost1 + cost2 + cost3
+    total_tok  = _add(_add(tok1, tok2), tok3)
+
+    votes = [out1["rating"], out2["rating"], out3["rating"]]
+    from collections import Counter
+    majority_rating = Counter(votes).most_common(1)[0][0]
+    winner = next(o for o in [out1, out2, out3] if o["rating"] == majority_rating)
+    winner = dict(winner)  # don't mutate original
+    winner["reasoning"] += f"  [majority {Counter(votes).most_common(1)[0][1]}/3 votes]"
+    return winner, total_cost, total_tok
+
+
 # ── stdin parser ──────────────────────────────────────────────────────────────
 
 def parse_quiver_stdin(text: str) -> list[dict]:

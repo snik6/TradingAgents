@@ -27,7 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from quiver_analyze import (
     QUIVER_DB, RATING_RANK,
-    fetch_quiver, fetch_wsj, build_prompt, call_claude,
+    fetch_quiver, fetch_wsj, build_prompt, call_claude, vote_claude,
 )
 
 # ── Email credentials (read from env or hard-coded fallback) ─────────────────
@@ -111,6 +111,8 @@ def main() -> None:
                    help="Top picks to highlight in the email (default 5)")
     p.add_argument("--min-skin",  type=float, default=7.0,
                    help="Minimum skin-in-game score to include (default 7.0)")
+    p.add_argument("--votes",     type=int,   default=1, choices=[1, 3],
+                   help="1=single call (default), 3=majority vote (2 calls, 3rd on split)")
     p.add_argument("--date",      default=date.today().isoformat(),
                    help="Signal date ceiling YYYY-MM-DD (default today)")
     p.add_argument("--no-email",  action="store_true",
@@ -139,7 +141,8 @@ def main() -> None:
             wsj    = fetch_wsj(ticker, args.date)
             prompt = build_prompt(ticker, c["price"], c["quiver_bonus"],
                                   c["signals"], c["mktcap_B"], qctx, wsj)
-            out, cost, tokens = call_claude(prompt, args.model)
+            caller = vote_claude if args.votes == 3 else call_claude
+            out, cost, tokens = caller(prompt, args.model)
             total_cost += cost
             for k in total_tokens:
                 total_tokens[k] += tokens[k]
