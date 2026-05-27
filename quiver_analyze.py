@@ -214,14 +214,18 @@ def build_prompt(ticker: str, price: float, quiver_bonus: float,
 # ── claude call ───────────────────────────────────────────────────────────────
 
 def call_claude(prompt: str, model: str) -> dict:
-    result = subprocess.run(
-        ["claude", "-p", "--no-session-persistence",
-         "--output-format", "json",
-         "--model", model,
-         "--json-schema", SCHEMA,
-         prompt],
-        capture_output=True, text=True,
-    )
+    try:
+        result = subprocess.run(
+            ["claude", "-p", "--no-session-persistence",
+             "--output-format", "json",
+             "--model", model,
+             "--json-schema", SCHEMA,
+             prompt],
+            capture_output=True, text=True,
+            timeout=600,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("claude -p timed out after 10 minutes")
     if result.returncode != 0:
         raise RuntimeError(result.stderr[:400])
     data = json.loads(result.stdout)
