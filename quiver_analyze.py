@@ -35,6 +35,9 @@ WSJ_DB = Path(
 
 RATING_RANK = {"Buy": 0, "Overweight": 1, "Hold": 2, "Underweight": 3, "Sell": 4}
 
+# Path to scanner-desktop source — used by fetch_desktop_enrichment()
+_DESKTOP_SRC = Path.home() / "gitFinance" / "scanner-desktop" / "src"
+
 SCHEMA = json.dumps({
     "type": "object",
     "properties": {
@@ -134,15 +137,108 @@ def fetch_wsj(ticker: str, date: str) -> dict:
     return ctx
 
 
+# ── scanner-desktop enrichment ────────────────────────────────────────────────
+
+# Module-level reader cache — loaded once per process, reused per ticker.
+_desktop_readers: dict = {}
+
+
+def fetch_desktop_enrichment(ticker: str) -> dict:
+    """
+    Enrich a ticker using scanner-desktop's QuiverReader and WSJSignalsReader.
+
+    Returns a flat dict with:
+      quiver_bonus        float  — computed conviction bonus (all signal types)
+      lobby_30d_M         float  — lobbying spend last 30d ($M)
+      lobby_90d_M         float  — lobbying spend last 90d ($M)
+      lobby_top_issue     str    — top lobbying issue area
+      wsj_macro_label     str    — BULLISH / BEARISH / NEUTRAL
+      wsj_macro_score     float
+      wsj_newsletter_score float — aggregate newsletter directional score
+      wsj_sentiment       float  — today's avg article sentiment
+      wsj_net_events      float  — positive minus negative events today
+      wsj_pt_change_pct   float  — analyst PT change % (if any)
+      wsj_merger_arb      int    — 1 if M&A event detected
+      wsj_legal           int    — 1 if legal event detected
+      wsj_credit          int    — 1 if credit downgrade detected
+      wsj_days_bullish    int    — days with net-positive coverage in 63d window
+      wsj_days_bearish    int    — days with net-negative coverage in 63d window
+      wsj_narrative_shift_flag int — 1 if abrupt sentiment reversal detected
+    """
+    global _desktop_readers
+
+    if not _DESKTOP_SRC.exists():
+        return {}
+
+    if not _desktop_readers:
+        if str(_DESKTOP_SRC) not in sys.path:
+            sys.path.insert(0, str(_DESKTOP_SRC))
+        try:
+            from analysis.quiver.reader import QuiverReader
+            from analysis.wsj_signals_reader import WSJSignalsReader
+
+            qr = QuiverReader({
+                "enabled": True,
+                "db_path": str(QUIVER_DB),
+                "modules": {
+                    "insider": True, "govcontracts": True,
+                    "lobbying": True, "sec13f": True, "darkpool": True,
+                },
+            })
+            qr.load()
+
+            wr = WSJSignalsReader({"enabled": True, "path": str(WSJ_DB)})
+            wr.load()
+
+            _desktop_readers["quiver"] = qr
+            _desktop_readers["wsj"]    = wr
+        except Exception:
+            return {}
+
+    qr = _desktop_readers.get("quiver")
+    wr = _desktop_readers.get("wsj")
+    if not qr or not wr:
+        return {}
+
+    candidate = {"symbol": ticker}
+    qr.enrich_candidate(candidate)
+    wr.enrich_candidate(candidate)
+    bonus = qr.score_bonus(candidate)
+
+    lobby_30d = candidate.get("quiver_lobby_value_30d") or 0.0
+    lobby_90d = candidate.get("quiver_lobby_value_90d") or 0.0
+
+    return {
+        "quiver_bonus":          round(bonus, 2),
+        "lobby_30d_M":           round(lobby_30d / 1e6, 2) if lobby_30d else 0.0,
+        "lobby_90d_M":           round(lobby_90d / 1e6, 2) if lobby_90d else 0.0,
+        "lobby_top_issue":       candidate.get("quiver_lobby_top_issue") or "",
+        "wsj_macro_label":       candidate.get("wsj_macro_label") or "NEUTRAL",
+        "wsj_macro_score":       candidate.get("wsj_macro_score") or 0.0,
+        "wsj_newsletter_score":  candidate.get("wsj_newsletter_score") or 0.0,
+        "wsj_sentiment":         candidate.get("wsj_sentiment") or 0.0,
+        "wsj_net_events":        candidate.get("wsj_net_events") or 0.0,
+        "wsj_pt_change_pct":     candidate.get("wsj_pt_change_pct"),
+        "wsj_merger_arb":        candidate.get("wsj_merger_arb_flag") or 0,
+        "wsj_legal":             candidate.get("wsj_legal_flag") or 0,
+        "wsj_credit":            candidate.get("wsj_credit_flag") or 0,
+        "wsj_days_bullish":      candidate.get("wsj_days_bullish") or 0,
+        "wsj_days_bearish":      candidate.get("wsj_days_bearish") or 0,
+        "wsj_narrative_shift_flag": candidate.get("wsj_narrative_shift_flag") or 0,
+    }
+
+
 # ── prompt ────────────────────────────────────────────────────────────────────
 
 def build_prompt(ticker: str, price: float, quiver_bonus: float,
                  signals: list[str], mktcap_B: float,
-                 qctx: dict, wsj: dict) -> str:
+                 qctx: dict, wsj: dict, desktop: dict | None = None) -> str:
+    d = desktop or {}
+    effective_bonus = d.get("quiver_bonus", quiver_bonus)
     lines = [
         "You are a buy-side equity analyst. Rate this stock using ONLY the signals below.",
         f"Ticker: {ticker}  Price: ${price}  Market cap: ${mktcap_B:.1f}B  "
-        f"Quiver bonus: {quiver_bonus:+.2f}",
+        f"Quiver bonus: {effective_bonus:+.2f}",
         f"Signals fired: {', '.join(signals) or 'none'}",
         "",
     ]
@@ -196,8 +292,45 @@ def build_prompt(ticker: str, price: float, quiver_bonus: float,
         for a in wsj["articles"]:
             lines.append(f"  [{a['date']}] {a['headline']}: {a['snippet'][:200]}")
 
+    # ── scanner-desktop enrichment ─────────────────────────────────────────
+    if d:
+        if d.get("lobby_30d_M"):
+            lobby = (
+                f"LOBBYING: ${d['lobby_30d_M']}M/30d  ${d['lobby_90d_M']}M/90d"
+                + (f"  top issue: {d['lobby_top_issue']}" if d.get("lobby_top_issue") else "")
+            )
+            lines.append(lobby)
+
+        if d.get("wsj_macro_label") and d["wsj_macro_label"] != "NEUTRAL":
+            macro = (
+                f"MACRO: {d['wsj_macro_label']} ({d['wsj_macro_score']:+.2f})"
+            )
+            if d.get("wsj_newsletter_score"):
+                macro += f"  newsletter score: {d['wsj_newsletter_score']:+.2f}"
+            lines.append(macro)
+
+        if d.get("wsj_sentiment") or d.get("wsj_net_events") or d.get("wsj_pt_change_pct"):
+            daily = f"WSJ DAILY: sentiment={d.get('wsj_sentiment', 0):.2f}  net_events={d.get('wsj_net_events', 0):+.0f}"
+            if d.get("wsj_pt_change_pct") is not None:
+                daily += f"  PT_change={d['wsj_pt_change_pct']:+.1f}%"
+            lines.append(daily)
+
+        trend_parts = []
+        if d.get("wsj_days_bullish") or d.get("wsj_days_bearish"):
+            trend_parts.append(f"{d['wsj_days_bullish']}d bullish / {d['wsj_days_bearish']}d bearish (63d window)")
+        if d.get("wsj_narrative_shift_flag"):
+            trend_parts.append("NARRATIVE SHIFT DETECTED")
+        if trend_parts:
+            lines.append("WSJ TREND: " + "  ".join(trend_parts))
+
+        flags = [k for k, f in [("M&A-target", d.get("wsj_merger_arb")),
+                                  ("legal", d.get("wsj_legal")),
+                                  ("credit-downgrade", d.get("wsj_credit"))] if f]
+        if flags:
+            lines.append(f"WSJ RISK FLAGS: {', '.join(flags)}  — penalise accordingly")
+
     if not any(k in qctx for k in ("insider", "f13", "dark_pool", "gov")) \
-            and not wsj:
+            and not wsj and not d:
         lines.append("NOTE: No signal data found in DB for this ticker.")
 
     lines += [

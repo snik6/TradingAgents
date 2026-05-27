@@ -27,7 +27,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from quiver_analyze import (
     QUIVER_DB, RATING_RANK,
-    fetch_quiver, fetch_wsj, build_prompt, call_claude, vote_claude,
+    fetch_quiver, fetch_wsj, fetch_desktop_enrichment,
+    build_prompt, call_claude, vote_claude,
 )
 
 # ── Email credentials (read from env or hard-coded fallback) ─────────────────
@@ -137,10 +138,11 @@ def main() -> None:
         print(f"  {ticker:6}  clusters={c['_clusters']}  skin={c['_skin']}  "
               f"${c['_purch_M']}M", end=" … ", flush=True)
         try:
-            qctx   = fetch_quiver(ticker, args.date)
-            wsj    = fetch_wsj(ticker, args.date)
-            prompt = build_prompt(ticker, c["price"], c["quiver_bonus"],
-                                  c["signals"], c["mktcap_B"], qctx, wsj)
+            qctx     = fetch_quiver(ticker, args.date)
+            wsj      = fetch_wsj(ticker, args.date)
+            desktop  = fetch_desktop_enrichment(ticker)
+            prompt   = build_prompt(ticker, c["price"], c["quiver_bonus"],
+                                    c["signals"], c["mktcap_B"], qctx, wsj, desktop)
             caller = vote_claude if args.votes == 3 else call_claude
             out, cost, tokens = caller(prompt, args.model)
             total_cost += cost
@@ -159,22 +161,25 @@ def main() -> None:
     results.sort(key=lambda r: RATING_RANK.get(r[1], 99))
 
     # ── Build report ──────────────────────────────────────────────────────────
+    actionable = [r for r in results if r[1] in ("Buy", "Overweight")]
     sep = "=" * 62
     lines = [
         f"Quiver Insider Picks — {args.date}",
         f"Model: {args.model}   Screened: {len(candidates)}   "
         f"Cost: ${total_cost:.3f}",
-        sep,
-        f"TOP {args.top} PICKS",
-        sep,
     ]
-    for i, (ticker, rating, reasoning, clusters, skin, purch_M) in \
-            enumerate(results[:args.top], 1):
-        lines.append(
-            f"\n{i}. {ticker}: {rating}  "
-            f"[{clusters} clusters, skin={skin}, ${purch_M}M bought]"
-        )
-        lines.append(f"   {reasoning}")
+
+    if actionable:
+        lines += [sep, f"BUY / OVERWEIGHT ({len(actionable)} tickers)", sep]
+        for i, (ticker, rating, reasoning, clusters, skin, purch_M) in \
+                enumerate(actionable, 1):
+            lines.append(
+                f"\n{i}. {ticker}: {rating}  "
+                f"[{clusters} clusters, skin={skin}, ${purch_M}M bought]"
+            )
+            lines.append(f"   {reasoning}")
+    else:
+        lines += [sep, "No Buy or Overweight ratings today.", sep]
 
     lines += [
         f"\n{sep}",
@@ -202,7 +207,11 @@ def main() -> None:
         print("\n[--no-email] skipping send")
         return
 
-    subject = f"Quiver Insider Picks — {args.date}"
+    subject = (
+        f"Quiver: {len(actionable)} actionable — {args.date}"
+        if actionable else
+        f"Quiver: no actionable picks — {args.date}"
+    )
     send_email(subject, body)
     print(f"\nEmail sent → {RECIPIENT}")
 
