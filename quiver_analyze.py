@@ -428,10 +428,14 @@ def vote_claude(prompt: str, model: str) -> tuple[dict, float, dict]:
 
     votes = [out1["rating"], out2["rating"], out3["rating"]]
     from collections import Counter
-    majority_rating = Counter(votes).most_common(1)[0][0]
+    counts = Counter(votes)
+    majority_rating, majority_count = counts.most_common(1)[0]
     winner = next(o for o in [out1, out2, out3] if o["rating"] == majority_rating)
     winner = dict(winner)  # don't mutate original
-    winner["reasoning"] += f"  [majority {Counter(votes).most_common(1)[0][1]}/3 votes]"
+    if majority_count >= 2:
+        winner["reasoning"] += f"  [majority {majority_count}/3 votes]"
+    else:
+        winner["reasoning"] += "  [3-way split — tiebreaker]"
     return winner, total_cost, total_tok
 
 
