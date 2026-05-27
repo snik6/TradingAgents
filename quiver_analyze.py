@@ -228,7 +228,14 @@ def call_claude(prompt: str, model: str) -> dict:
     if data.get("is_error"):
         raise RuntimeError(str(data))
     cost = data.get("total_cost_usd", 0)
-    return data["structured_output"], cost
+    usage = data.get("usage", {})
+    tokens = {
+        "input":          usage.get("input_tokens", 0),
+        "cache_write":    usage.get("cache_creation_input_tokens", 0),
+        "cache_read":     usage.get("cache_read_input_tokens", 0),
+        "output":         usage.get("output_tokens", 0),
+    }
+    return data["structured_output"], cost, tokens
 
 
 # ── stdin parser ──────────────────────────────────────────────────────────────
@@ -301,6 +308,7 @@ def main() -> None:
 
     results: list[tuple] = []
     total_cost = 0.0
+    total_tokens = {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0}
 
     for c in candidates:
         ticker = c["ticker"]
@@ -310,11 +318,17 @@ def main() -> None:
             wsj = fetch_wsj(ticker, args.date)
             prompt = build_prompt(ticker, c["price"], c["quiver_bonus"],
                                   c["signals"], c["mktcap_B"], qctx, wsj)
-            out, cost = call_claude(prompt, args.model)
+            out, cost, tokens = call_claude(prompt, args.model)
             total_cost += cost
+            for k in total_tokens:
+                total_tokens[k] += tokens[k]
             rating = out.get("rating", "Hold")
             reasoning = out.get("reasoning", "")
-            print(f"→ {rating}  (${cost:.3f})")
+            print(
+                f"→ {rating}  (${cost:.3f} | "
+                f"in={tokens['input']} cw={tokens['cache_write']} "
+                f"cr={tokens['cache_read']} out={tokens['output']})"
+            )
             results.append((ticker, rating, reasoning, c["price"], c["mktcap_B"]))
         except Exception as e:  # noqa: BLE001
             print(f"→ ERROR: {e}")
@@ -338,6 +352,13 @@ def main() -> None:
     for ticker, rating, _, _, _ in results:
         print(f"  {ticker}: {rating}")
     print(f"\nTotal cost: ${total_cost:.3f}")
+    print(
+        f"Total tokens: {sum(total_tokens.values()):,}  "
+        f"(input={total_tokens['input']:,}  "
+        f"cache_write={total_tokens['cache_write']:,}  "
+        f"cache_read={total_tokens['cache_read']:,}  "
+        f"output={total_tokens['output']:,})"
+    )
 
 
 if __name__ == "__main__":
