@@ -228,7 +228,11 @@ debate and the 3-way risk debate are genuinely cross-model instead of one model
 arguing with itself (different training, different blind spots, less echo-chamber
 agreement).
 
+**Heavyweight (paid):** Gemini + Claude across roles — needs `ANTHROPIC_API_KEY`
+**with API credits** (separate from a Claude.ai/Code subscription) and `GOOGLE_API_KEY`:
+
 ```python
+config["llm_provider"] = "anthropic"
 config["debate_models"] = {
     "bull":           {"provider": "google",    "model": "gemini-2.5-pro"},
     "bear":           {"provider": "anthropic", "model": "claude-sonnet-4-6"},
@@ -240,18 +244,33 @@ config["debate_models"] = {
 }
 ```
 
+**No paid API (Gemini + local ollama)** — what `main.py` ships by default. Genuinely
+cross-model (Gemini cloud vs local), needs only `GOOGLE_API_KEY` + a running ollama:
+
+```python
+config["llm_provider"] = "google"
+config["debate_models"] = {
+    "bull":           {"provider": "google", "model": "gemini-2.5-pro"},
+    "bear":           {"provider": "ollama", "model": "qwen2.5:14b"},
+    "aggressive":     {"provider": "google", "model": "gemini-2.5-flash"},
+    "conservative":   {"provider": "ollama", "model": "llama3.1:8b"},
+    "neutral":        {"provider": "ollama", "model": "qwen2.5:14b"},
+    "research_judge": {"provider": "google", "model": "gemini-2.5-pro"},
+    "risk_judge":     {"provider": "google", "model": "gemini-2.5-pro"},
+}
+```
+
 Notes:
 - **Free-text roles** (`bull`, `bear`, `trader`, `aggressive`, `neutral`, `conservative`)
   accept any provider. The **structured-output judges** (`research_judge`, `risk_judge`)
-  should stay on a strong model (Claude / Gemini Pro).
+  should stay on a strong model (Claude / Gemini Pro), not a weak local model.
 - **Analysts are not mixable here** — they use tool-calling and stay on the base
   `llm_provider`; don't point them at a weak local model.
 - Each role spec accepts an optional `base_url`; omit it to use the provider's
   default (e.g. ollama → `http://localhost:11434/v1`).
-- Set the API key for **every** provider you reference (`ANTHROPIC_API_KEY`,
-  `GOOGLE_API_KEY`, …). Note: a real `ANTHROPIC_API_KEY` is required — the keyless
-  `claude -p` CLI is not a LangChain provider. `debate_models = None` (default)
-  keeps the original single-provider behavior.
+- Set the API key for **every** provider you reference. A real `ANTHROPIC_API_KEY`
+  **with credits** is required for anthropic roles — the keyless `claude -p` CLI is not
+  a LangChain provider. `debate_models = None` (default) keeps single-provider behavior.
 
 ## Persistence and Recovery
 
