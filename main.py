@@ -47,12 +47,15 @@ config["tool_vendors"] = {
     "get_insider_transactions": "yfinance",
 }
 
-# Initialize with custom config
-ta = TradingAgentsGraph(debug=True, config=config)
+# Run a demo analysis only when executed directly (`python main.py`), so that
+# `import main` can reuse `config` without kicking off a full graph run.
+if __name__ == "__main__":
+    # Initialize with custom config
+    ta = TradingAgentsGraph(debug=True, config=config)
 
-# forward propagate
-_, decision = ta.propagate("SYM", "2026-05-22")
-print(decision)
+    # forward propagate
+    _, decision = ta.propagate("SYM", "2026-05-22")
+    print(decision)
 
-# Memorize mistakes and reflect
-# ta.reflect_and_remember(1000) # parameter is the position returns
+    # Memorize mistakes and reflect
+    # ta.reflect_and_remember(1000) # parameter is the position returns
