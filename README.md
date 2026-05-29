@@ -220,6 +220,39 @@ print(decision)
 
 See `tradingagents/default_config.py` for all configuration options.
 
+### Mixed-model adversarial debate
+
+By default every agent uses the single `llm_provider`. Set `debate_models` to run
+**opposing debate roles on different model providers** — so the bull/bear research
+debate and the 3-way risk debate are genuinely cross-model instead of one model
+arguing with itself (different training, different blind spots, less echo-chamber
+agreement).
+
+```python
+config["debate_models"] = {
+    "bull":           {"provider": "google",    "model": "gemini-2.5-pro"},
+    "bear":           {"provider": "anthropic", "model": "claude-sonnet-4-6"},
+    "aggressive":     {"provider": "google",    "model": "gemini-2.5-flash"},
+    "conservative":   {"provider": "anthropic", "model": "claude-haiku-4-5"},
+    "neutral":        {"provider": "ollama",    "model": "qwen2.5:14b"},
+    "research_judge": {"provider": "anthropic", "model": "claude-sonnet-4-6"},
+    "risk_judge":     {"provider": "anthropic", "model": "claude-sonnet-4-6"},
+}
+```
+
+Notes:
+- **Free-text roles** (`bull`, `bear`, `trader`, `aggressive`, `neutral`, `conservative`)
+  accept any provider. The **structured-output judges** (`research_judge`, `risk_judge`)
+  should stay on a strong model (Claude / Gemini Pro).
+- **Analysts are not mixable here** — they use tool-calling and stay on the base
+  `llm_provider`; don't point them at a weak local model.
+- Each role spec accepts an optional `base_url`; omit it to use the provider's
+  default (e.g. ollama → `http://localhost:11434/v1`).
+- Set the API key for **every** provider you reference (`ANTHROPIC_API_KEY`,
+  `GOOGLE_API_KEY`, …). Note: a real `ANTHROPIC_API_KEY` is required — the keyless
+  `claude -p` CLI is not a LangChain provider. `debate_models = None` (default)
+  keeps the original single-provider behavior.
+
 ## Persistence and Recovery
 
 TradingAgents persists two kinds of state across runs.
