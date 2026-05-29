@@ -117,6 +117,27 @@ def screen_tickers(n: int, min_skin: float) -> list[dict]:
     return tickers
 
 
+# ── Report formatting ───────────────────────────────────────────────────────
+
+def _signal_suffix(r: dict) -> str:
+    """Compact 13F-flow + insider-sell annotation — the signals that most often
+    explain a Hold (institutions exiting / insiders also selling) but were
+    previously invisible in the report."""
+    bits = []
+    net = r.get("net13_M")
+    if net is not None:
+        sign = "+" if net >= 0 else ""
+        flow = f"13F net {sign}{net}M"
+        buyers, sellers = r.get("buyers"), r.get("sellers")
+        if buyers is not None and sellers is not None:
+            flow += f" ({buyers}b/{sellers}s)"
+        bits.append(flow)
+    if r.get("sell_flag"):
+        ss = r.get("sell_skin")
+        bits.append("⚠ insider SELL cluster" + (f" (skin {ss})" if ss else ""))
+    return ("  | " + ", ".join(bits)) if bits else ""
+
+
 # ── Email ─────────────────────────────────────────────────────────────────────
 
 def send_email(subject: str, body: str) -> None:
@@ -177,8 +198,12 @@ def main() -> None:
         mktcap_B = enr.get("market_cap_B", 0.0) or 0.0
         print(f"  {ticker:6}  clusters={c['_clusters']}  skin={c['_skin']}  "
               f"${c['_purch_M']}M", end=" … ", flush=True)
+        f13: dict = {}
+        ins: dict = {}
         try:
             qctx     = fetch_quiver(ticker, args.date)
+            f13      = qctx.get("f13", {}) or {}        # 13F net flow / buyers / sellers
+            ins      = qctx.get("insider", {}) or {}    # incl. sell-cluster signal
             wsj      = fetch_wsj(ticker, args.date)
             desktop  = fetch_desktop_enrichment(ticker)
             prompt   = build_prompt(ticker, price, c["quiver_bonus"],
@@ -191,19 +216,24 @@ def main() -> None:
             rating    = out.get("rating", "Hold")
             reasoning = out.get("reasoning", "")
             print(f"{rating}  (${cost:.3f})")
-            results.append((ticker, rating, reasoning,
-                            c["_clusters"], c["_skin"], c["_purch_M"],
-                            price, mktcap_B))
         except Exception as e:  # noqa: BLE001
             print(f"ERROR: {e}")
-            results.append((ticker, "Hold", f"ERROR: {e}",
-                            c["_clusters"], c["_skin"], c["_purch_M"],
-                            price, mktcap_B))
+            rating, reasoning = "Hold", f"ERROR: {e}"
 
-    results.sort(key=lambda r: RATING_RANK.get(r[1], 99))
+        results.append({
+            "ticker": ticker, "rating": rating, "reasoning": reasoning,
+            "clusters": c["_clusters"], "skin": c["_skin"], "purch_M": c["_purch_M"],
+            "price": price, "mcap_B": mktcap_B,
+            "net13_M": f13.get("net_M"), "buyers": f13.get("buyers"),
+            "sellers": f13.get("sellers"),
+            "sell_flag": ins.get("clustered_sell", False),
+            "sell_skin": ins.get("sell_skin"),
+        })
+
+    results.sort(key=lambda r: RATING_RANK.get(r["rating"], 99))
 
     # ── Build report ──────────────────────────────────────────────────────────
-    actionable = [r for r in results if r[1] in ("Buy", "Overweight")]
+    actionable = [r for r in results if r["rating"] in ("Buy", "Overweight")]
     sep = "=" * 62
     lines = [
         f"Quiver Insider Picks — {args.date}",
@@ -213,29 +243,33 @@ def main() -> None:
 
     if actionable:
         lines += [sep, f"BUY / OVERWEIGHT ({len(actionable)} tickers)", sep]
-        for i, (ticker, rating, reasoning, clusters, skin, purch_M, price, mcap_B) in \
-                enumerate(actionable, 1):
-            price_str = f"  ${price:.2f}" if price else ""
-            mcap_str  = f"  mcap=${mcap_B:.1f}B" if mcap_B else ""
+        for i, r in enumerate(actionable, 1):
+            price_str = f"  ${r['price']:.2f}" if r["price"] else ""
+            mcap_str  = f"  mcap=${r['mcap_B']:.1f}B" if r["mcap_B"] else ""
             lines.append(
-                f"\n{i}. {ticker}: {rating}  "
-                f"[{clusters} clusters, skin={skin}, ${purch_M}M bought]"
-                f"{price_str}{mcap_str}"
+                f"\n{i}. {r['ticker']}: {r['rating']}  "
+                f"[{r['clusters']} clusters, skin={r['skin']}, ${r['purch_M']}M bought]"
+                f"{price_str}{mcap_str}{_signal_suffix(r)}"
             )
-            lines.append(f"   {reasoning}")
+            lines.append(f"   {r['reasoning']}")
     else:
         lines += [sep, "No Buy or Overweight ratings today.", sep]
 
+    # Full ranking — now shows the 13F/sell signals AND the per-pick reasoning,
+    # so an all-Hold day is interpretable (you can see WHY each is a Hold).
     lines += [
         f"\n{sep}",
         "Full ranking:",
     ]
-    for ticker, rating, _, clusters, skin, purch_M, price, mcap_B in results:
-        price_str = f"  ${price:.2f}" if price else ""
+    for r in results:
+        price_str = f"  ${r['price']:.2f}" if r["price"] else ""
         lines.append(
-            f"  {ticker:6} {rating:12}  "
-            f"clusters={clusters}  skin={skin}  ${purch_M}M{price_str}"
+            f"  {r['ticker']:6} {r['rating']:12}  "
+            f"clusters={r['clusters']}  skin={r['skin']}  ${r['purch_M']}M{price_str}"
+            f"{_signal_suffix(r)}"
         )
+        if r["reasoning"]:
+            lines.append(f"       {r['reasoning']}")
 
     lines += [
         "",
