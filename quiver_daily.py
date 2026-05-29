@@ -33,6 +33,14 @@ from quiver_analyze import (
     build_prompt, call_claude, vote_claude,
 )
 
+# Load .env so GOOGLE_API_KEY is available for the optional Gemini catalyst
+# (the keyless `claude -p` path needs no key, but Gemini grounding does).
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
+
 _DESKTOP_DIR = Path.home() / "gitFinance" / "scanner-desktop"
 _ENRICH_PY   = Path(__file__).parent / "quiver_enrich.py"
 _ENRICH_VENV = _DESKTOP_DIR / "venv" / "bin" / "python"
@@ -138,6 +146,48 @@ def _signal_suffix(r: dict) -> str:
     return ("  | " + ", ".join(bits)) if bits else ""
 
 
+_GEMINI_MODEL = "gemini-2.5-flash"
+
+
+def gemini_catalyst(ticker: str, timeout: int = 30) -> str | None:
+    """One-line, Google-Search-grounded 'why now' for a ticker.
+
+    The keyless `claude -p` analysis has no web access, so it can't see recent
+    news. This adds the missing catalyst context. Returns None on any failure —
+    never blocks the report.
+    """
+    import os
+    key = os.environ.get("GOOGLE_API_KEY")
+    if not key:
+        return None
+    try:
+        from google import genai
+        from google.genai import types
+    except Exception:
+        return None
+
+    prompt = (
+        f"In ONE concise sentence, state the most recent material news or catalyst "
+        f"for {ticker} stock in roughly the last two weeks (name the event and approx "
+        f"date). If there is no clear recent catalyst, reply exactly: "
+        f"no clear recent catalyst."
+    )
+    try:
+        client = genai.Client(api_key=key,
+                              http_options=types.HttpOptions(timeout=timeout * 1000))
+        resp = client.models.generate_content(
+            model=_GEMINI_MODEL, contents=prompt,
+            config=types.GenerateContentConfig(
+                tools=[types.Tool(google_search=types.GoogleSearch())]
+            ),
+        )
+        text = (resp.text or "").strip().replace("\n", " ")
+        return text or None
+    except Exception as e:  # noqa: BLE001
+        print(f"  [gemini] WARN {ticker}: {str(e)[:120]}")
+        return None
+
+
 # ── Email ─────────────────────────────────────────────────────────────────────
 
 def send_email(subject: str, body: str) -> None:
@@ -170,6 +220,9 @@ def main() -> None:
                    help="Signal date ceiling YYYY-MM-DD (default today)")
     p.add_argument("--no-email",  action="store_true",
                    help="Print report without sending email")
+    p.add_argument("--catalyst",  action="store_true",
+                   help="Add a Gemini Google-Search-grounded catalyst line per pick "
+                        "(needs GOOGLE_API_KEY; ~1 grounded call/ticker)")
     args = p.parse_args()
 
     candidates = screen_tickers(args.screen, args.min_skin)
@@ -220,6 +273,8 @@ def main() -> None:
             print(f"ERROR: {e}")
             rating, reasoning = "Hold", f"ERROR: {e}"
 
+        catalyst = gemini_catalyst(ticker) if args.catalyst else None
+
         results.append({
             "ticker": ticker, "rating": rating, "reasoning": reasoning,
             "clusters": c["_clusters"], "skin": c["_skin"], "purch_M": c["_purch_M"],
@@ -228,6 +283,7 @@ def main() -> None:
             "sellers": f13.get("sellers"),
             "sell_flag": ins.get("clustered_sell", False),
             "sell_skin": ins.get("sell_skin"),
+            "catalyst": catalyst,
         })
 
     results.sort(key=lambda r: RATING_RANK.get(r["rating"], 99))
@@ -252,6 +308,8 @@ def main() -> None:
                 f"{price_str}{mcap_str}{_signal_suffix(r)}"
             )
             lines.append(f"   {r['reasoning']}")
+            if r.get("catalyst"):
+                lines.append(f"   catalyst: {r['catalyst']}")
     else:
         lines += [sep, "No Buy or Overweight ratings today.", sep]
 
@@ -270,6 +328,8 @@ def main() -> None:
         )
         if r["reasoning"]:
             lines.append(f"       {r['reasoning']}")
+        if r.get("catalyst"):
+            lines.append(f"       catalyst: {r['catalyst']}")
 
     lines += [
         "",
