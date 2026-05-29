@@ -6,34 +6,31 @@ from dotenv import load_dotenv
 # Load environment variables from .env file (expects ANTHROPIC_API_KEY).
 load_dotenv()
 
-# Anthropic Claude — split cheap/fast and deep/strong models across the pipeline
-# so analyst summaries stay cheap and only the debate/synthesis pays for Sonnet.
+# Gemini + local — no Anthropic API needed (the Anthropic API account has no
+# credit balance; the keyless `claude -p` CLI can't be a LangChain provider).
+# Base provider is Google so analysts/tool-calling run on Gemini Flash.
 config = DEFAULT_CONFIG.copy()
-config["llm_provider"] = "anthropic"
-config["deep_think_llm"] = "claude-sonnet-4-6"  # researcher debate, risk review
-config["quick_think_llm"] = "claude-haiku-4-5"  # analyst summaries
+config["llm_provider"] = "google"
+config["deep_think_llm"] = "gemini-2.5-pro"     # researcher debate, risk review
+config["quick_think_llm"] = "gemini-2.5-flash"  # analyst summaries
 config["max_debate_rounds"] = 1                 # bump to 2+ for richer debates (more tokens)
-# Optional: enable extended thinking for the deep steps (more cost, better reasoning).
-# config["anthropic_effort"] = "medium"         # "low" | "medium" | "high"
 
 # Mixed-model adversarial debate — opposing roles run on DIFFERENT models so the
 # bull/bear and risk debates are genuinely cross-model, not one model arguing with
-# itself. Analysts (tool-calling) stay on the llm_provider above (Claude).
+# itself. This mapping uses ONLY providers available now: Gemini (GOOGLE_API_KEY)
+# and local ollama (qwen2.5:14b / llama3.1:8b) — no Anthropic API cost.
+# To switch to the Claude heavyweight version later, add API credits at
+# console.anthropic.com and set bear/judges back to anthropic/claude-sonnet-4-6.
 #
-# PREREQS (all three) — this mapping 401s without them:
-#   1. ANTHROPIC_API_KEY in .env — a REAL key. The keyless `claude -p` CLI does
-#      NOT work here; LangChain's ChatAnthropic needs an actual API key. The
-#      anthropic base provider (analysts + Claude debate roles) needs it too.
-#   2. GOOGLE_API_KEY in .env — for the Gemini roles (already set).
-#   3. local ollama daemon running with qwen2.5:14b — for the neutral role.
+# PREREQS: GOOGLE_API_KEY in .env + local ollama daemon running with the models below.
 config["debate_models"] = {
-    "bull":           {"provider": "google",    "model": "gemini-2.5-pro"},
-    "bear":           {"provider": "anthropic", "model": "claude-sonnet-4-6"},
-    "aggressive":     {"provider": "google",    "model": "gemini-2.5-flash"},
-    "conservative":   {"provider": "anthropic", "model": "claude-haiku-4-5"},
-    "neutral":        {"provider": "ollama",    "model": "qwen2.5:14b"},
-    "research_judge": {"provider": "anthropic", "model": "claude-sonnet-4-6"},
-    "risk_judge":     {"provider": "anthropic", "model": "claude-sonnet-4-6"},
+    "bull":           {"provider": "google", "model": "gemini-2.5-pro"},
+    "bear":           {"provider": "ollama", "model": "qwen2.5:14b"},
+    "aggressive":     {"provider": "google", "model": "gemini-2.5-flash"},
+    "conservative":   {"provider": "ollama", "model": "llama3.1:8b"},
+    "neutral":        {"provider": "ollama", "model": "qwen2.5:14b"},
+    "research_judge": {"provider": "google", "model": "gemini-2.5-pro"},
+    "risk_judge":     {"provider": "google", "model": "gemini-2.5-pro"},
 }
 
 # Data vendors — yfinance is free; WSJ news comes from shared/wsj_signals.db,
