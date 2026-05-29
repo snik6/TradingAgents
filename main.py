@@ -16,6 +16,26 @@ config["max_debate_rounds"] = 1                 # bump to 2+ for richer debates 
 # Optional: enable extended thinking for the deep steps (more cost, better reasoning).
 # config["anthropic_effort"] = "medium"         # "low" | "medium" | "high"
 
+# Mixed-model adversarial debate — opposing roles run on DIFFERENT models so the
+# bull/bear and risk debates are genuinely cross-model, not one model arguing with
+# itself. Analysts (tool-calling) stay on the llm_provider above (Claude).
+#
+# PREREQS (all three) — this mapping 401s without them:
+#   1. ANTHROPIC_API_KEY in .env — a REAL key. The keyless `claude -p` CLI does
+#      NOT work here; LangChain's ChatAnthropic needs an actual API key. The
+#      anthropic base provider (analysts + Claude debate roles) needs it too.
+#   2. GOOGLE_API_KEY in .env — for the Gemini roles (already set).
+#   3. local ollama daemon running with qwen2.5:14b — for the neutral role.
+config["debate_models"] = {
+    "bull":           {"provider": "google",    "model": "gemini-2.5-pro"},
+    "bear":           {"provider": "anthropic", "model": "claude-sonnet-4-6"},
+    "aggressive":     {"provider": "google",    "model": "gemini-2.5-flash"},
+    "conservative":   {"provider": "anthropic", "model": "claude-haiku-4-5"},
+    "neutral":        {"provider": "ollama",    "model": "qwen2.5:14b"},
+    "research_judge": {"provider": "anthropic", "model": "claude-sonnet-4-6"},
+    "risk_judge":     {"provider": "anthropic", "model": "claude-sonnet-4-6"},
+}
+
 # Data vendors — yfinance is free; WSJ news comes from shared/wsj_signals.db,
 # populated by the scanner-politics pipeline. Override the DB path with WSJ_DB.
 config["data_vendors"] = {

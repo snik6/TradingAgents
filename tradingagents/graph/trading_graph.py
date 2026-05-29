@@ -113,6 +113,7 @@ class TradingAgentsGraph:
             self.deep_thinking_llm,
             self.tool_nodes,
             self.conditional_logic,
+            role_llms=self._build_role_llms(),
         )
 
         self.propagator = Propagator()
@@ -129,10 +130,18 @@ class TradingAgentsGraph:
         self.graph = self.workflow.compile()
         self._checkpointer_ctx = None
 
+    # Providers that route through the OpenAI-compatible client (need a base_url;
+    # ollama defaults to http://localhost:11434/v1 when base_url is None).
+    _OAI_COMPATIBLE = {"openai", "xai", "deepseek", "qwen", "glm", "ollama", "openrouter"}
+
     def _get_provider_kwargs(self) -> Dict[str, Any]:
-        """Get provider-specific kwargs for LLM client creation."""
+        """Provider-specific kwargs for the default (graph-wide) provider."""
+        return self._provider_kwargs_for(self.config.get("llm_provider", ""))
+
+    def _provider_kwargs_for(self, provider: str) -> Dict[str, Any]:
+        """Provider-specific LLM constructor kwargs for any given provider."""
         kwargs = {}
-        provider = self.config.get("llm_provider", "").lower()
+        provider = (provider or "").lower()
 
         if provider == "google":
             thinking_level = self.config.get("google_thinking_level")
@@ -150,6 +159,47 @@ class TradingAgentsGraph:
                 kwargs["effort"] = effort
 
         return kwargs
+
+    def _build_role_llms(self) -> Optional[Dict[str, Any]]:
+        """Build per-role LLMs for mixed-model adversarial debate.
+
+        Reads config['debate_models']: {role: {"provider":..., "model":...,
+        "base_url"(optional):...}}. Returns None when unset — preserving the
+        original single-provider behavior. Distinct (provider, model) pairs are
+        built once and shared across roles.
+
+        Roles: bull, bear, trader, aggressive, neutral, conservative,
+        research_judge, risk_judge. Judges use structured output → keep them on
+        a model with solid structured-output support (Claude / Gemini Pro).
+        """
+        debate_models = self.config.get("debate_models")
+        if not debate_models:
+            return None
+
+        cache: Dict[tuple, Any] = {}
+        role_llms: Dict[str, Any] = {}
+        for role, spec in debate_models.items():
+            provider = spec["provider"]
+            model = spec["model"]
+            key = (provider.lower(), model)
+            if key not in cache:
+                kwargs = self._provider_kwargs_for(provider)
+                if self.callbacks:
+                    kwargs["callbacks"] = self.callbacks
+                # Per-role base_url override; else let each client use its own
+                # default (e.g. ollama → http://localhost:11434/v1).
+                base_url = spec.get("base_url")
+                client = create_llm_client(
+                    provider=provider, model=model, base_url=base_url, **kwargs
+                )
+                cache[key] = client.get_llm()
+            role_llms[role] = cache[key]
+
+        logging.getLogger(__name__).info(
+            "Mixed-model debate active: "
+            + ", ".join(f"{r}={s['provider']}/{s['model']}" for r, s in debate_models.items())
+        )
+        return role_llms
 
     def _create_tool_nodes(self) -> Dict[str, ToolNode]:
         """Create tool nodes for different data sources using abstract methods."""

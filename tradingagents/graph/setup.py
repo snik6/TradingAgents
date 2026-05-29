@@ -19,12 +19,23 @@ class GraphSetup:
         deep_thinking_llm: Any,
         tool_nodes: Dict[str, ToolNode],
         conditional_logic: ConditionalLogic,
+        role_llms: Dict[str, Any] = None,
     ):
-        """Initialize with required components."""
+        """Initialize with required components.
+
+        role_llms: optional {role_name: llm} map for mixed-model adversarial
+        debate. Roles fall back to quick/deep when not present, so an empty
+        map reproduces the original single-provider behavior exactly.
+        """
         self.quick_thinking_llm = quick_thinking_llm
         self.deep_thinking_llm = deep_thinking_llm
         self.tool_nodes = tool_nodes
         self.conditional_logic = conditional_logic
+        self.role_llms = role_llms or {}
+
+    def _role_llm(self, role: str, default: Any) -> Any:
+        """LLM for a debate role — the per-role override if set, else the default."""
+        return self.role_llms.get(role, default)
 
     def setup_graph(
         self, selected_analysts=["market", "social", "news", "fundamentals"]
@@ -74,17 +85,20 @@ class GraphSetup:
             delete_nodes["fundamentals"] = create_msg_delete()
             tool_nodes["fundamentals"] = self.tool_nodes["fundamentals"]
 
-        # Create researcher and manager nodes
-        bull_researcher_node = create_bull_researcher(self.quick_thinking_llm)
-        bear_researcher_node = create_bear_researcher(self.quick_thinking_llm)
-        research_manager_node = create_research_manager(self.deep_thinking_llm)
-        trader_node = create_trader(self.quick_thinking_llm)
+        # Create researcher and manager nodes.
+        # Debate roles (bull/bear) use plain llm.invoke (free-text), so any
+        # provider works — this is where mixed-model adversarial debate lives.
+        # The research_judge uses structured output, so keep it on a strong model.
+        bull_researcher_node = create_bull_researcher(self._role_llm("bull", self.quick_thinking_llm))
+        bear_researcher_node = create_bear_researcher(self._role_llm("bear", self.quick_thinking_llm))
+        research_manager_node = create_research_manager(self._role_llm("research_judge", self.deep_thinking_llm))
+        trader_node = create_trader(self._role_llm("trader", self.quick_thinking_llm))
 
-        # Create risk analysis nodes
-        aggressive_analyst = create_aggressive_debator(self.quick_thinking_llm)
-        neutral_analyst = create_neutral_debator(self.quick_thinking_llm)
-        conservative_analyst = create_conservative_debator(self.quick_thinking_llm)
-        portfolio_manager_node = create_portfolio_manager(self.deep_thinking_llm)
+        # Create risk analysis nodes (free-text debators; risk_judge is structured)
+        aggressive_analyst = create_aggressive_debator(self._role_llm("aggressive", self.quick_thinking_llm))
+        neutral_analyst = create_neutral_debator(self._role_llm("neutral", self.quick_thinking_llm))
+        conservative_analyst = create_conservative_debator(self._role_llm("conservative", self.quick_thinking_llm))
+        portfolio_manager_node = create_portfolio_manager(self._role_llm("risk_judge", self.deep_thinking_llm))
 
         # Create workflow
         workflow = StateGraph(AgentState)

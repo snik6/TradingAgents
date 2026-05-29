@@ -35,6 +35,18 @@ DEFAULT_CONFIG = {
     "max_debate_rounds": 1,
     "max_risk_discuss_rounds": 1,
     "max_recur_limit": 100,
+    # Mixed-model adversarial debate (optional). When None, every agent uses the
+    # single llm_provider above. When set, maps debate roles to their own
+    # provider/model so opposing sides run on DIFFERENT models. Free-text roles
+    # (bull, bear, trader, aggressive, neutral, conservative) accept any provider;
+    # the structured-output judges (research_judge, risk_judge) should stay on a
+    # strong model (Claude / Gemini Pro). Example:
+    #   "debate_models": {
+    #     "bull": {"provider": "google", "model": "gemini-2.5-pro"},
+    #     "bear": {"provider": "anthropic", "model": "claude-sonnet-4-6"},
+    #     "research_judge": {"provider": "anthropic", "model": "claude-sonnet-4-6"},
+    #   }
+    "debate_models": None,
     # Data vendor configuration
     # Category-level configuration (default for all tools in category)
     "data_vendors": {
