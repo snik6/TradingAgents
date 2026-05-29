@@ -24,5 +24,5 @@ log() { echo "[$(date '+%H:%M:%S')] $*"; }
 mkdir -p "$LOG_DIR"
 
 log "=== Quiver analyze $(date '+%Y-%m-%d') ==="
-"$PYTHON" quiver_daily.py --votes 3 "$@"
+"$PYTHON" quiver_daily.py --votes 3 --catalyst "$@"
 log "Done."
