@@ -399,10 +399,20 @@ def call_claude(prompt: str, model: str) -> dict:
     except subprocess.TimeoutExpired:
         raise RuntimeError("claude -p timed out after 10 minutes")
     if result.returncode != 0:
-        raise RuntimeError(result.stderr[:400])
+        # API errors land in stdout (JSON), not stderr — extract the real message.
+        msg = result.stderr[:400] or ""
+        try:
+            out_data = json.loads(result.stdout)
+            api_msg = out_data.get("result") or out_data.get("error") or ""
+            if api_msg:
+                msg = str(api_msg)
+        except Exception:
+            pass
+        raise RuntimeError(msg or f"claude exited {result.returncode}")
     data = json.loads(result.stdout)
     if data.get("is_error"):
-        raise RuntimeError(str(data))
+        api_msg = data.get("result") or data.get("error") or ""
+        raise RuntimeError(str(api_msg) or str(data))
     cost = data.get("total_cost_usd", 0)
     usage = data.get("usage", {})
     tokens = {
