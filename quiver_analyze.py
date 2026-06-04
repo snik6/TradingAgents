@@ -378,10 +378,17 @@ def build_prompt(ticker: str, price: float, quiver_bonus: float,
 
 # ── claude call ───────────────────────────────────────────────────────────────
 
+# Resolve the claude binary by full path — under cron, ~/.local/bin is NOT on
+# PATH, so a bare "claude" raises FileNotFoundError ([Errno 2]). Fall back to a
+# PATH lookup only if the expected location is missing.
+_CLAUDE_BIN = Path.home() / ".local" / "bin" / "claude"
+_CLAUDE_BIN = str(_CLAUDE_BIN) if _CLAUDE_BIN.exists() else "claude"
+
+
 def call_claude(prompt: str, model: str) -> dict:
     try:
         result = subprocess.run(
-            ["claude", "-p", "--no-session-persistence",
+            [_CLAUDE_BIN, "-p", "--no-session-persistence",
              "--output-format", "json",
              "--model", model,
              "--json-schema", SCHEMA,
