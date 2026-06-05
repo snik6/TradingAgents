@@ -21,7 +21,7 @@ import smtplib
 import sqlite3
 import subprocess
 import sys
-from datetime import date
+from datetime import date, timedelta
 from email.mime.text import MIMEText
 from pathlib import Path
 
@@ -237,6 +237,45 @@ def send_email(subject: str, body: str) -> None:
         server.sendmail(SENDER_EMAIL, [RECIPIENT], msg.as_string())
 
 
+# ── Repeat filter ─────────────────────────────────────────────────────────────
+
+_HISTORY_FILE = Path(__file__).parent / "logs" / "quiver_daily_history.csv"
+
+
+def _load_repeat_tickers(window_days: int, today: date) -> set[str]:
+    """Return tickers seen within the last window_days days (excluding today)."""
+    cutoff = today - timedelta(days=window_days)
+    seen: set[str] = set()
+    if not _HISTORY_FILE.exists():
+        return seen
+    with open(_HISTORY_FILE) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("date"):
+                continue
+            parts = line.split(",")
+            if len(parts) < 2:
+                continue
+            try:
+                row_date = date.fromisoformat(parts[0])
+                ticker = parts[1].strip()
+                if cutoff <= row_date < today:
+                    seen.add(ticker)
+            except ValueError:
+                continue
+    return seen
+
+
+def _save_history(today: date, tickers: list[str]) -> None:
+    _HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not _HISTORY_FILE.exists()
+    with open(_HISTORY_FILE, "a") as f:
+        if write_header:
+            f.write("date,ticker\n")
+        for ticker in tickers:
+            f.write(f"{today.isoformat()},{ticker}\n")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -259,6 +298,8 @@ def main() -> None:
     p.add_argument("--catalyst",  action="store_true",
                    help="Add a Gemini Google-Search-grounded catalyst line per pick "
                         "(needs GOOGLE_API_KEY; ~1 grounded call/ticker)")
+    p.add_argument("--repeat-window", type=int, default=7,
+                   help="Suppress tickers seen in the last N days (default 7, 0=off)")
     args = p.parse_args()
 
     candidates = screen_tickers(args.screen, args.min_skin)
@@ -267,10 +308,15 @@ def main() -> None:
               f"(min skin={args.min_skin})")
         sys.exit(0)
 
-    print(f"Quiver daily  {args.date}  model={args.model}  "
-          f"screen={len(candidates)}  min_skin={args.min_skin}\n")
+    today_date = date.fromisoformat(args.date)
+    repeat_set = _load_repeat_tickers(args.repeat_window, today_date) if args.repeat_window > 0 else set()
 
-    results: list[tuple] = []
+    print(f"Quiver daily  {args.date}  model={args.model}  "
+          f"screen={len(candidates)}  min_skin={args.min_skin}"
+          + (f"  repeat_window={args.repeat_window}d" if args.repeat_window > 0 else "") + "\n")
+
+    results: list[dict] = []
+    repeat_results: list[dict] = []
 
     # Batch-fetch scanner-desktop enrichment (price, zscore, rvol, conviction, …)
     all_tickers = [c["ticker"] for c in candidates]
@@ -283,14 +329,25 @@ def main() -> None:
         enr    = scanner_data.get(ticker, {})
         price    = enr.get("price", 0.0) or 0.0
         mktcap_B = enr.get("market_cap_B", 0.0) or 0.0
+
+        if ticker in repeat_set:
+            print(f"  {ticker:6}  clusters={c['_clusters']}  skin={c['_skin']}  "
+                  f"${c['_purch_M']}M … REPEAT (skip)")
+            repeat_results.append({
+                "ticker": ticker, "clusters": c["_clusters"],
+                "skin": c["_skin"], "purch_M": c["_purch_M"],
+                "price": price, "mcap_B": mktcap_B,
+            })
+            continue
+
         print(f"  {ticker:6}  clusters={c['_clusters']}  skin={c['_skin']}  "
               f"${c['_purch_M']}M", end=" … ", flush=True)
         f13: dict = {}
         ins: dict = {}
         try:
             qctx     = fetch_quiver(ticker, args.date)
-            f13      = qctx.get("f13", {}) or {}        # 13F net flow / buyers / sellers
-            ins      = qctx.get("insider", {}) or {}    # incl. sell-cluster signal
+            f13      = qctx.get("f13", {}) or {}
+            ins      = qctx.get("insider", {}) or {}
             wsj      = fetch_wsj(ticker, args.date)
             desktop  = fetch_desktop_enrichment(ticker)
             prompt   = build_prompt(ticker, price, c["quiver_bonus"],
@@ -361,10 +418,26 @@ def main() -> None:
         if r.get("catalyst"):
             lines.append(f"       catalyst: {r['catalyst']}")
 
+    if repeat_results:
+        lines += [
+            f"\n{sep}",
+            f"Repeat signals suppressed ({len(repeat_results)}, seen in last {args.repeat_window}d):",
+        ]
+        for r in repeat_results:
+            price_str = f"  ${r['price']:.2f}" if r["price"] else ""
+            lines.append(f"  {r['ticker']:6}  clusters={r['clusters']}  "
+                         f"skin={r['skin']}  ${r['purch_M']}M{price_str}")
+
     lines += [""]
 
     body = "\n".join(lines)
     print(f"\n{body}")
+
+    # Persist new tickers to history so tomorrow's run can suppress them.
+    if args.repeat_window > 0:
+        new_tickers = [r["ticker"] for r in results]
+        if new_tickers:
+            _save_history(today_date, new_tickers)
 
     if args.no_email:
         print("\n[--no-email] skipping send")
