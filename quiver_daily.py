@@ -148,6 +148,41 @@ def _signal_suffix(r: dict) -> str:
 
 _GEMINI_MODEL = "gemini-2.5-flash"
 
+# Cross-process Gemini rate limiter — shares the same JSON counter file as
+# scanner-desktop so all processes (spike detector, ignition watcher, Blue
+# alerts, swing catalyst, quiver_daily) cooperate under one 8/min cap.
+# Free tier allows 10/min; 8 leaves headroom for bursts.
+_GEMINI_RATE_FILE = _DESKTOP_DIR / "data" / "gemini_rate_limit.json"
+_GEMINI_LOCK_FILE = _DESKTOP_DIR / "data" / "gemini_rate_limit.lock"
+_GEMINI_MAX_CALLS = 8
+_GEMINI_PERIOD    = 60.0
+
+
+def _gemini_rate_wait() -> None:
+    """Acquire one Gemini slot via the shared cross-process sliding window."""
+    import fcntl, time
+    while True:
+        with open(_GEMINI_LOCK_FILE, "w") as lf:
+            fcntl.flock(lf, fcntl.LOCK_EX)
+            try:
+                now = time.time()
+                try:
+                    timestamps = json.loads(_GEMINI_RATE_FILE.read_text()) \
+                        if _GEMINI_RATE_FILE.exists() else []
+                except (json.JSONDecodeError, OSError):
+                    timestamps = []
+                timestamps = [t for t in timestamps if t > now - _GEMINI_PERIOD]
+                if len(timestamps) < _GEMINI_MAX_CALLS:
+                    timestamps.append(now)
+                    _GEMINI_RATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+                    _GEMINI_RATE_FILE.write_text(json.dumps(timestamps))
+                    return
+                sleep_time = _GEMINI_PERIOD - (now - min(timestamps)) + 0.05
+            finally:
+                fcntl.flock(lf, fcntl.LOCK_UN)
+        print(f"  [gemini] rate limit ({_GEMINI_MAX_CALLS}/min) — waiting {sleep_time:.1f}s")
+        time.sleep(sleep_time)
+
 
 def gemini_catalyst(ticker: str, timeout: int = 30) -> str | None:
     """One-line, Google-Search-grounded 'why now' for a ticker.
@@ -173,6 +208,7 @@ def gemini_catalyst(ticker: str, timeout: int = 30) -> str | None:
         f"no clear recent catalyst."
     )
     try:
+        _gemini_rate_wait()
         client = genai.Client(api_key=key,
                               http_options=types.HttpOptions(timeout=timeout * 1000))
         resp = client.models.generate_content(
