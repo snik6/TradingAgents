@@ -242,10 +242,10 @@ def send_email(subject: str, body: str) -> None:
 _HISTORY_FILE = Path(__file__).parent / "logs" / "quiver_daily_history.csv"
 
 
-def _load_repeat_tickers(window_days: int, today: date) -> set[str]:
-    """Return tickers seen within the last window_days days (excluding today)."""
+def _load_repeat_tickers(window_days: int, today: date) -> dict[str, int]:
+    """Return {ticker: max_clusters_seen} for tickers seen within window_days (excluding today)."""
     cutoff = today - timedelta(days=window_days)
-    seen: set[str] = set()
+    seen: dict[str, int] = {}
     if not _HISTORY_FILE.exists():
         return seen
     with open(_HISTORY_FILE) as f:
@@ -259,21 +259,22 @@ def _load_repeat_tickers(window_days: int, today: date) -> set[str]:
             try:
                 row_date = date.fromisoformat(parts[0])
                 ticker = parts[1].strip()
+                clusters = int(parts[2]) if len(parts) > 2 else 0
                 if cutoff <= row_date < today:
-                    seen.add(ticker)
+                    seen[ticker] = max(seen.get(ticker, 0), clusters)
             except ValueError:
                 continue
     return seen
 
 
-def _save_history(today: date, tickers: list[str]) -> None:
+def _save_history(today: date, candidates: list[dict]) -> None:
     _HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
     write_header = not _HISTORY_FILE.exists()
     with open(_HISTORY_FILE, "a") as f:
         if write_header:
-            f.write("date,ticker\n")
-        for ticker in tickers:
-            f.write(f"{today.isoformat()},{ticker}\n")
+            f.write("date,ticker,clusters\n")
+        for c in candidates:
+            f.write(f"{today.isoformat()},{c['ticker']},{c.get('clusters', 0)}\n")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -309,7 +310,7 @@ def main() -> None:
         sys.exit(0)
 
     today_date = date.fromisoformat(args.date)
-    repeat_set = _load_repeat_tickers(args.repeat_window, today_date) if args.repeat_window > 0 else set()
+    repeat_set = _load_repeat_tickers(args.repeat_window, today_date) if args.repeat_window > 0 else {}
 
     print(f"Quiver daily  {args.date}  model={args.model}  "
           f"screen={len(candidates)}  min_skin={args.min_skin}"
@@ -330,7 +331,8 @@ def main() -> None:
         price    = enr.get("price", 0.0) or 0.0
         mktcap_B = enr.get("market_cap_B", 0.0) or 0.0
 
-        if ticker in repeat_set:
+        prior_clusters = repeat_set.get(ticker)
+        if prior_clusters is not None and c["_clusters"] <= prior_clusters:
             print(f"  {ticker:6}  clusters={c['_clusters']}  skin={c['_skin']}  "
                   f"${c['_purch_M']}M … REPEAT (skip)")
             repeat_results.append({
@@ -339,9 +341,13 @@ def main() -> None:
                 "price": price, "mcap_B": mktcap_B,
             })
             continue
+        if prior_clusters is not None:
+            print(f"  {ticker:6}  clusters={c['_clusters']}  skin={c['_skin']}  "
+                  f"${c['_purch_M']}M … ESCALATED ({prior_clusters}→{c['_clusters']} clusters)", end=" ", flush=True)
+        else:
+            print(f"  {ticker:6}  clusters={c['_clusters']}  skin={c['_skin']}  "
+                  f"${c['_purch_M']}M", end=" … ", flush=True)
 
-        print(f"  {ticker:6}  clusters={c['_clusters']}  skin={c['_skin']}  "
-              f"${c['_purch_M']}M", end=" … ", flush=True)
         f13: dict = {}
         ins: dict = {}
         try:
@@ -435,9 +441,9 @@ def main() -> None:
 
     # Persist new tickers to history so tomorrow's run can suppress them.
     if args.repeat_window > 0:
-        new_tickers = [r["ticker"] for r in results]
-        if new_tickers:
-            _save_history(today_date, new_tickers)
+        analyzed = [{"ticker": r["ticker"], "clusters": r["clusters"]} for r in results]
+        if analyzed:
+            _save_history(today_date, analyzed)
 
     if args.no_email:
         print("\n[--no-email] skipping send")
