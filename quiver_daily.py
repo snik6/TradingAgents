@@ -271,8 +271,6 @@ def main() -> None:
           f"screen={len(candidates)}  min_skin={args.min_skin}\n")
 
     results: list[tuple] = []
-    total_cost   = 0.0
-    total_tokens = {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0}
 
     # Batch-fetch scanner-desktop enrichment (price, zscore, rvol, conviction, …)
     all_tickers = [c["ticker"] for c in candidates]
@@ -298,13 +296,10 @@ def main() -> None:
             prompt   = build_prompt(ticker, price, c["quiver_bonus"],
                                     c["signals"], mktcap_B, qctx, wsj, desktop, enr)
             caller = vote_claude if args.votes == 3 else call_claude
-            out, cost, tokens = caller(prompt, args.model)
-            total_cost += cost
-            for k in total_tokens:
-                total_tokens[k] += tokens[k]
+            out       = caller(prompt, args.model)
             rating    = out.get("rating", "Hold")
             reasoning = out.get("reasoning", "")
-            print(f"{rating}  (${cost:.3f})")
+            print(f"{rating}")
         except Exception as e:  # noqa: BLE001
             print(f"ERROR: {e}")
             rating, reasoning = "Hold", f"ERROR: {e}"
@@ -329,8 +324,7 @@ def main() -> None:
     sep = "=" * 62
     lines = [
         f"Quiver Insider Picks — {args.date}",
-        f"Model: {args.model}   Screened: {len(candidates)}   "
-        f"Cost: ${total_cost:.3f}",
+        f"Model: {args.model}   Screened: {len(candidates)}",
     ]
 
     if actionable:
@@ -367,14 +361,7 @@ def main() -> None:
         if r.get("catalyst"):
             lines.append(f"       catalyst: {r['catalyst']}")
 
-    lines += [
-        "",
-        f"Total cost: ${total_cost:.3f}",
-        f"Tokens: input={total_tokens['input']:,}  "
-        f"cache_write={total_tokens['cache_write']:,}  "
-        f"cache_read={total_tokens['cache_read']:,}  "
-        f"output={total_tokens['output']:,}",
-    ]
+    lines += [""]
 
     body = "\n".join(lines)
     print(f"\n{body}")
