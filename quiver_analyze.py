@@ -428,35 +428,65 @@ def vote_claude(prompt: str, model: str) -> dict:
 # quiver_daily history lives next to this file
 _HISTORY_FILE = Path(__file__).parent / "logs" / "quiver_daily_history.csv"
 
+# scanner-desktop Blue alert CSVs — second source for stdin/pipe mode
+_BLUE_OUTPUT_DIR = Path.home() / "gitFinance" / "scanner-desktop" / "data" / "output"
+
 
 def load_appearance_dates(window_days: int = 90,
                           today: date = None) -> dict[str, set]:
-    """Return {ticker: set_of_dates} from quiver_daily_history.csv.
+    """Return {ticker: set_of_dates} from both history sources:
 
-    Covers the last `window_days` calendar days, excluding today, so the
-    dot plot reflects prior appearances only.
+    1. quiver_daily_history.csv — daily quiver screen appearances
+    2. blue_quiver_*.csv in scanner-desktop/data/output — Blue alert appearances
+
+    Merging both means stdin/pipe mode (which processes Blue alert tickers)
+    gets dot plots too, even for tickers that never surfaced in the daily screen.
+    Covers the last `window_days` calendar days, excluding today.
     """
     if today is None:
         today = date.today()
     cutoff = today - timedelta(days=window_days)
     dates: dict[str, set] = {}
-    if not _HISTORY_FILE.exists():
-        return dates
-    with open(_HISTORY_FILE) as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("date"):
+
+    # Source 1: quiver_daily_history.csv (date,ticker,clusters)
+    if _HISTORY_FILE.exists():
+        with open(_HISTORY_FILE) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("date"):
+                    continue
+                parts = line.split(",")
+                if len(parts) < 2:
+                    continue
+                try:
+                    row_date = date.fromisoformat(parts[0])
+                    ticker = parts[1].strip()
+                    if cutoff <= row_date < today:
+                        dates.setdefault(ticker, set()).add(row_date)
+                except ValueError:
+                    continue
+
+    # Source 2: blue_quiver_YYYYMMDD.csv (scanner-desktop Blue alerts)
+    if _BLUE_OUTPUT_DIR.exists():
+        for csv_file in _BLUE_OUTPUT_DIR.glob("blue_quiver_*.csv"):
+            try:
+                stem = csv_file.stem.replace("blue_quiver_", "")
+                file_date = date(int(stem[:4]), int(stem[4:6]), int(stem[6:8]))
+            except (ValueError, IndexError):
                 continue
-            parts = line.split(",")
-            if len(parts) < 2:
+            if file_date >= today or file_date < cutoff:
                 continue
             try:
-                row_date = date.fromisoformat(parts[0])
-                ticker = parts[1].strip()
-                if cutoff <= row_date < today:
-                    dates.setdefault(ticker, set()).add(row_date)
-            except ValueError:
+                with open(csv_file) as f:
+                    f.readline()  # skip header
+                    for line in f:
+                        parts = line.split(",")
+                        sym = parts[0].strip().strip('"')
+                        if sym and sym.isupper() and 1 <= len(sym) <= 5 and sym != "symbol":
+                            dates.setdefault(sym, set()).add(file_date)
+            except OSError:
                 continue
+
     return dates
 
 
