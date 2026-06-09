@@ -164,7 +164,7 @@ def enrich(tickers: list[str]) -> dict[str, dict]:
         for c in candidates:
             try:
                 res = scorer.calculate_score(c)
-                c["conviction_score"]     = res.get("final_score", 0)
+                c["conviction_score"]     = res.get("score", 0)
                 c["conviction_passes"]    = res.get("passes", False)
                 c["conviction_breakdown"] = res.get("breakdown", {})
             except Exception as exc:
