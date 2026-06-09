@@ -21,6 +21,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+from datetime import date, timedelta
 from pathlib import Path
 
 QUIVER_DB = Path(
@@ -422,6 +423,64 @@ def vote_claude(prompt: str, model: str) -> dict:
     return winner
 
 
+# ── dot plot helpers (shared with quiver_daily) ───────────────────────────────
+
+# quiver_daily history lives next to this file
+_HISTORY_FILE = Path(__file__).parent / "logs" / "quiver_daily_history.csv"
+
+
+def load_appearance_dates(window_days: int = 90,
+                          today: date = None) -> dict[str, set]:
+    """Return {ticker: set_of_dates} from quiver_daily_history.csv.
+
+    Covers the last `window_days` calendar days, excluding today, so the
+    dot plot reflects prior appearances only.
+    """
+    if today is None:
+        today = date.today()
+    cutoff = today - timedelta(days=window_days)
+    dates: dict[str, set] = {}
+    if not _HISTORY_FILE.exists():
+        return dates
+    with open(_HISTORY_FILE) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("date"):
+                continue
+            parts = line.split(",")
+            if len(parts) < 2:
+                continue
+            try:
+                row_date = date.fromisoformat(parts[0])
+                ticker = parts[1].strip()
+                if cutoff <= row_date < today:
+                    dates.setdefault(ticker, set()).add(row_date)
+            except ValueError:
+                continue
+    return dates
+
+
+def dot_plot(dates_seen: set, window_days: int = 90,
+             today: date = None, n_buckets: int = 13) -> str:
+    """ASCII dot plot: 13 weekly buckets, oldest left, newest right.
+
+    · = no appearances that week, ● = appeared at least once.
+    Only returned when at least one bucket is filled; empty history → "".
+    """
+    if today is None:
+        today = date.today()
+    buckets = [False] * n_buckets
+    for d in dates_seen:
+        days_ago = (today - d).days
+        if 1 <= days_ago <= window_days:
+            position = window_days - days_ago
+            idx = min(int(position * n_buckets / window_days), n_buckets - 1)
+            buckets[idx] = True
+    if not any(buckets):
+        return ""
+    return " ".join("●" if b else "·" for b in buckets)
+
+
 # ── stdin parser ──────────────────────────────────────────────────────────────
 
 def parse_quiver_stdin(text: str) -> list[dict]:
@@ -488,6 +547,9 @@ def main() -> None:
         p.print_help()
         raise SystemExit(1)
 
+    today_date = date.today()
+    qtd_dates = load_appearance_dates(90, today_date)
+
     print(f"Analyzing {len(candidates)} tickers  model={args.model}  date<={args.date}\n")
 
     results: list[tuple] = []
@@ -520,12 +582,17 @@ def main() -> None:
             f"MCap ${mcap:.1f}B" if mcap else "",
         ]))
         print(f"\n{i}. {ticker}: {rating}  {meta}")
+        dp = dot_plot(qtd_dates.get(ticker, set()), today=today_date)
+        if dp:
+            print(f"   90d: {dp}")
         print(f"   {reasoning}")
 
     print(f"\n{'=' * 70}")
     print("Full ranking:")
     for ticker, rating, _, _, _ in results:
-        print(f"  {ticker}: {rating}")
+        dp = dot_plot(qtd_dates.get(ticker, set()), today=today_date)
+        dp_str = f"  90d: {dp}" if dp else ""
+        print(f"  {ticker}: {rating}{dp_str}")
 
 
 if __name__ == "__main__":

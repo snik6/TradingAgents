@@ -31,6 +31,7 @@ from quiver_analyze import (
     QUIVER_DB, RATING_RANK,
     fetch_quiver, fetch_wsj, fetch_desktop_enrichment,
     build_prompt, call_claude, vote_claude,
+    load_appearance_dates, dot_plot,
 )
 
 # Load .env so GOOGLE_API_KEY is available for the optional Gemini catalyst
@@ -267,47 +268,6 @@ def _load_repeat_tickers(window_days: int, today: date) -> dict[str, int]:
     return seen
 
 
-def _load_appearance_dates(window_days: int, today: date) -> dict[str, set]:
-    """Return {ticker: set_of_dates} for the last `window_days` days (excluding today)."""
-    cutoff = today - timedelta(days=window_days)
-    dates: dict[str, set] = {}
-    if not _HISTORY_FILE.exists():
-        return dates
-    with open(_HISTORY_FILE) as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("date"):
-                continue
-            parts = line.split(",")
-            if len(parts) < 2:
-                continue
-            try:
-                row_date = date.fromisoformat(parts[0])
-                ticker = parts[1].strip()
-                if cutoff <= row_date < today:
-                    dates.setdefault(ticker, set()).add(row_date)
-            except ValueError:
-                continue
-    return dates
-
-
-def _dot_plot(dates_seen: set, window_days: int = 90,
-              today: date = None, n_buckets: int = 13) -> str:
-    """ASCII dot plot: 13 weekly buckets, oldest left, newest right.
-
-    · = no appearances that week, ● = appeared at least once.
-    Example: · · · ● · ● ● · · ● ● · ●
-    """
-    if today is None:
-        today = date.today()
-    buckets = [False] * n_buckets
-    for d in dates_seen:
-        days_ago = (today - d).days
-        if 1 <= days_ago <= window_days:
-            position = window_days - days_ago
-            idx = min(int(position * n_buckets / window_days), n_buckets - 1)
-            buckets[idx] = True
-    return " ".join("●" if b else "·" for b in buckets)
 
 
 def _save_history(today: date, candidates: list[dict]) -> None:
@@ -354,7 +314,7 @@ def main() -> None:
 
     today_date = date.fromisoformat(args.date)
     repeat_set = _load_repeat_tickers(args.repeat_window, today_date) if args.repeat_window > 0 else {}
-    qtd_dates  = _load_appearance_dates(90, today_date)
+    qtd_dates  = load_appearance_dates(90, today_date)
 
     print(f"Quiver daily  {args.date}  model={args.model}  "
           f"screen={len(candidates)}  min_skin={args.min_skin}"
@@ -383,7 +343,7 @@ def main() -> None:
                 "ticker": ticker, "clusters": c["_clusters"],
                 "skin": c["_skin"], "purch_M": c["_purch_M"],
                 "price": price, "mcap_B": mktcap_B,
-                "dot_plot": _dot_plot(qtd_dates.get(ticker, set()), today=today_date),
+                "dot_plot": dot_plot(qtd_dates.get(ticker, set()), today=today_date),
             })
             continue
         if prior_clusters is not None:
@@ -423,7 +383,7 @@ def main() -> None:
             "sell_flag": ins.get("clustered_sell", False),
             "sell_skin": ins.get("sell_skin"),
             "catalyst": catalyst,
-            "dot_plot": _dot_plot(qtd_dates.get(ticker, set()), today=today_date),
+            "dot_plot": dot_plot(qtd_dates.get(ticker, set()), today=today_date),
         })
 
     results.sort(key=lambda r: RATING_RANK.get(r["rating"], 99))
@@ -446,7 +406,7 @@ def main() -> None:
                 f"[{r['clusters']} clusters, skin={r['skin']}, ${r['purch_M']}M bought]"
                 f"{price_str}{mcap_str}{_signal_suffix(r)}"
             )
-            if r.get("dot_plot", "").replace("·", "").replace(" ", ""):
+            if r.get("dot_plot"):
                 lines.append(f"   90d: {r['dot_plot']}")
             lines.append(f"   {r['reasoning']}")
             if r.get("catalyst"):
@@ -467,7 +427,7 @@ def main() -> None:
             f"clusters={r['clusters']}  skin={r['skin']}  ${r['purch_M']}M{price_str}"
             f"{_signal_suffix(r)}"
         )
-        if r.get("dot_plot", "").replace("·", "").replace(" ", ""):
+        if r.get("dot_plot"):
             lines.append(f"         90d: {r['dot_plot']}")
         if r["reasoning"]:
             lines.append(f"       {r['reasoning']}")
@@ -483,7 +443,7 @@ def main() -> None:
             price_str = f"  ${r['price']:.2f}" if r["price"] else ""
             lines.append(f"  {r['ticker']:6}  clusters={r['clusters']}  "
                          f"skin={r['skin']}  ${r['purch_M']}M{price_str}")
-            if r.get("dot_plot", "").replace("·", "").replace(" ", ""):
+            if r.get("dot_plot"):
                 lines.append(f"         90d: {r['dot_plot']}")
 
     lines += [""]
