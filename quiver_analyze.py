@@ -233,7 +233,8 @@ def build_prompt(ticker: str, price: float, quiver_bonus: float,
     eff_price   = s.get("price", price) or price
     eff_mcap    = s.get("market_cap_B", mktcap_B) or mktcap_B
     lines = [
-        "You are a buy-side equity analyst. Rate this stock using ONLY the signals below.",
+        "You are a buy-side equity analyst. All data you need is provided below — do NOT",
+        "cite your knowledge cutoff, request more data, or refuse to rate. Use ONLY these signals.",
         f"Ticker: {ticker}  Price: ${eff_price}  Market cap: ${eff_mcap:.1f}B  "
         f"Quiver bonus: {effective_bonus:+.2f}",
         f"Signals fired: {', '.join(signals) or 'none'}",
@@ -360,12 +361,12 @@ def build_prompt(ticker: str, price: float, quiver_bonus: float,
 
     lines += [
         "",
-        "Rate this stock: Buy / Overweight / Hold / Underweight / Sell.",
+        "MANDATORY: your first line must be exactly one word — Buy, Overweight, Hold, Underweight, or Sell.",
+        "Do not refuse. Do not hedge. Do not ask for more data. Rate using only the signals above.",
         "Weigh signal coherence heavily — insider+institutional alignment beats one strong signal alone.",
         "Penalise large 13F net outflows even when insider clusters are present.",
         "Consider that a 10x from current market cap requires exceptional, multi-year circumstances.",
-        "Start your response with exactly one of these words on the first line: Buy, Overweight, Hold, Underweight, Sell.",
-        "Then give 2-3 sentences of reasoning.",
+        "After the rating word, give 2-3 sentences of reasoning based solely on the signals provided.",
     ]
     return "\n".join(lines)
 
