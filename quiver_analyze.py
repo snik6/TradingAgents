@@ -496,21 +496,27 @@ def dot_plot(dates_seen: set, window_days: int = 90,
              today: date = None, n_buckets: int = 13) -> str:
     """ASCII dot plot: 13 weekly buckets, oldest left, newest right.
 
-    · = no appearances that week, ● = appeared at least once.
+    · = no appearances, ● = 1 appearance, digit = N appearances in that bucket.
     Only returned when at least one bucket is filled; empty history → "".
     """
     if today is None:
         today = date.today()
-    buckets = [False] * n_buckets
+    buckets = [0] * n_buckets
     for d in dates_seen:
         days_ago = (today - d).days
         if 1 <= days_ago <= window_days:
             position = window_days - days_ago
             idx = min(int(position * n_buckets / window_days), n_buckets - 1)
-            buckets[idx] = True
+            buckets[idx] += 1
     if not any(buckets):
         return ""
-    return " ".join("●" if b else "·" for b in buckets)
+    def _sym(n: int) -> str:
+        if n == 0:
+            return "·"
+        if n == 1:
+            return "●"
+        return str(min(n, 9))
+    return " ".join(_sym(b) for b in buckets)
 
 
 # ── stdin parser ──────────────────────────────────────────────────────────────
